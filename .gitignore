@@ -1,0 +1,22 @@
+# Build artifacts
+dist/
+*.js
+*.js.map
+*.d.ts
+*.d.ts.map
+!src/**/*.d.ts
+
+# Dependencies
+node_modules/
+
+# Runtime state (local to user machine)
+.DS_Store
+*.swp
+*.swo
+*~
+
+# Local Claude Code state
+/.claude/
+~/.claude/
+codememory.db
+codememory.db.backup

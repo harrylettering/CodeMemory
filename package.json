@@ -1,0 +1,47 @@
+{
+  "name": "codememory-for-claude",
+  "version": "0.1.0",
+  "description": "CodeMemory for Claude Code CLI",
+  "type": "module",
+  "main": "index.ts",
+  "license": "MIT",
+  "author": "harry <harlihao>",
+  "keywords": [
+    "claude-code",
+    "memory-system",
+    "codememory",
+    "context-management",
+    "llm",
+    "summarization",
+    "conversation-memory",
+    "dag"
+  ],
+  "scripts": {
+    "test": "vitest run --dir test",
+    "test:watch": "vitest watch --dir test",
+    "build": "tsc",
+    "build:watch": "tsc --watch",
+    "lint": "eslint src/**/*.ts",
+    "benchmark": "npm run build && node benchmark/lookup-latency.ts",
+    "benchmark:ci": "npm run build && node benchmark/lookup-latency.ts --ci"
+  },
+  "files": [
+    "index.ts",
+    "src/**/*.ts",
+    "SKILL.md",
+    "docs/",
+    "README.md",
+    "LICENSE"
+  ],
+  "dependencies": {
+    "@sinclair/typebox": "0.34.48",
+    "sqlite": "^5.1.1",
+    "sqlite3": "^6.0.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "eslint": "^9.0.0",
+    "typescript": "^5.7.0",
+    "vitest": "^3.0.0"
+  }
+}
