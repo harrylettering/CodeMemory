@@ -1,8 +1,10 @@
 # Memory Retrieval Reference
 
-> 本文是当前检索链路的操作性参考文档。正式定位与边界见 [MEMORY_FIRST_RETRIEVAL_ARCHITECTURE.md](./MEMORY_FIRST_RETRIEVAL_ARCHITECTURE.md)，生命周期规则见 [MEMORY_NODE_LIFECYCLE.md](./MEMORY_NODE_LIFECYCLE.md)。
+> Chinese version: [MEMORY_RETRIEVAL_REFERENCE.zh-CN.md](./MEMORY_RETRIEVAL_REFERENCE.zh-CN.md)
+>
+> This document is the operational reference for the current retrieval path. For formal positioning and architecture boundaries, see [MEMORY_FIRST_RETRIEVAL_ARCHITECTURE.md](./MEMORY_FIRST_RETRIEVAL_ARCHITECTURE.md). For lifecycle rules, see [MEMORY_NODE_LIFECYCLE.md](./MEMORY_NODE_LIFECYCLE.md).
 
-## 1. 当前检索主链
+## 1. Current retrieval chain
 
 ```text
 User prompt
@@ -16,33 +18,33 @@ User prompt
   -> markdown injection + metrics
 ```
 
-## 2. Prompt parse 与 query planning
+## 2. Prompt parsing and query planning
 
 ### 2.1 Fast plan
 
-每个 prompt 都先走 deterministic fast plan：
+Every prompt first goes through a deterministic fast plan:
 
-- 抽文件路径
-- 抽命令
-- 抽 symbol
-- 抽 topics
-- 推断 intent / wantedKinds / queryVariants / tagQueries
+- extract file paths
+- extract commands
+- extract symbols
+- extract topics
+- infer `intent`, `wantedKinds`, `queryVariants`, and `tagQueries`
 
-这一步完全本地执行，不需要再和模型交互。
+This step is fully local and does not require a model call.
 
 ### 2.2 Smart planner
 
-只有满足下面条件时，才会尝试 smart planner：
+The smart planner only runs when:
 
-- fast retrieval 命中很弱，且
-- prompt 明显在问历史、原因、决策、之前踩坑，或者
-- prompt 很抽象但有 topic 没有强 anchor
+- fast retrieval is weak, and
+- the prompt is clearly asking about history, rationale, decisions, or previous failures, or
+- the prompt is abstract and contains topics but no strong anchors
 
-换句话说，当前 query planner 不是“每次 prompt 都多打一轮模型”，而是一个 gated planner。
+In other words, the current query planner is gated. It is not an extra model round for every prompt.
 
 ## 3. Memory-first retrieval
 
-当前主召回对象包括：
+Primary retrieval targets currently include:
 
 - `task`
 - `constraint`
@@ -52,17 +54,17 @@ User prompt
 - `summary`
 - `rationale`
 
-当前排序目标不是“把所有历史都找回来”，而是优先找当前继续工作最需要的工程状态。
+The ranking goal is not "recover all history." It is "recover the engineering state most useful for the next step."
 
 ## 4. Relation stitch
 
-relation stitch 不是通用无界图遍历，而是：
+Relation stitch is not unbounded graph traversal. It is:
 
-- 先从 primary memory hits 出发
-- 做受控的一跳 / 两跳扩展
-- 按 prompt intent 做 whitelist / template 裁剪
+- seeded from primary memory hits
+- expanded through controlled one-hop or two-hop traversal
+- filtered by whitelist and templates based on prompt intent
 
-典型链路包括：
+Typical chains include:
 
 - `task -> decision`
 - `task -> fix_attempt -> failure`
@@ -71,27 +73,27 @@ relation stitch 不是通用无界图遍历，而是：
 
 ## 5. DAG backfill
 
-summary DAG 当前的角色不是主召回层，而是：
+The summary DAG is not the primary recall layer. Its current role is:
 
-- 证据层
-- 压缩层
-- 时间线回填层
-- 需要追问“为什么”时的补充层
+- evidence layer
+- compression layer
+- timeline backfill layer
+- support when the user asks "why"
 
-只有当 Memory-first + stitch 还不够时，才回填 DAG。
+The DAG is only consulted when memory-first retrieval plus relation stitch still do not explain enough.
 
 ## 6. Raw on demand
 
-raw message expansion 只在下面几类场景才值得触发：
+Raw message expansion is only worth triggering in cases like:
 
-- 需要用户原始约束原话
-- 需要还原失败日志原文
-- DAG 仍然解释不清当前冲突
-- 明确在做审计/追溯
+- the original user wording is needed
+- the original failure log needs to be restored
+- the DAG still cannot explain the current conflict
+- the user is explicitly doing audit or trace-back work
 
-## 7. 返回结果
+## 7. Return shape
 
-当前 `/retrieval/onPrompt` 返回的结构里，重要字段包括：
+The current `/retrieval/onPrompt` response includes important fields such as:
 
 - `plan`
 - `planner`
@@ -101,12 +103,12 @@ raw message expansion 只在下面几类场景才值得触发：
 - `metrics`
 - `counts`
 
-其中 `metrics` 目前已经可用于调试，但还没有长期聚合和离线评测体系。
+`metrics` is already useful for debugging, but there is not yet a full long-term aggregation and offline evaluation pipeline around it.
 
-## 8. 当前边界
+## 8. Current boundaries
 
-当前检索链路已经稳定，但仍有几个边界要明确：
+The retrieval chain is stable, but a few boundaries still matter:
 
-1. invalid summary id 在 expansion 某些路径里仍可能表现为空结果，而不是显式错误。
-2. `task / constraint` 自动提取还不是主路径，当前更依赖显式写入。
-3. debug-only 工具仍存在，但默认产品表面已经尽量收缩。
+1. Invalid summary IDs can still show up as empty expansion results in some paths instead of explicit errors.
+2. Automatic extraction for `task` and `constraint` is not the primary path yet; the system still relies more on explicit writes.
+3. Debug-only tools still exist, but the default product surface has already been narrowed down.

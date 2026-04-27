@@ -1,56 +1,112 @@
 # CodeMemory for Claude Code
 
-> Coding-specialized persistent memory for the Claude Code CLI.
-> *中文文档：[README.zh-CN.md](./README.zh-CN.md)*
+[![Node.js 18+](https://img.shields.io/badge/Node.js-18%2B-339933?logo=node.js&logoColor=white)](#prerequisites)
+[![TypeScript](https://img.shields.io/badge/TypeScript-ESM-3178C6?logo=typescript&logoColor=white)](#development)
+[![SQLite](https://img.shields.io/badge/SQLite-local--first-003B57?logo=sqlite&logoColor=white)](#architecture)
 
-CodeMemory is a Claude Code plugin that turns the agent's per-session context into durable, searchable engineering memory. It captures the full session JSONL, scores every message into a four-tier importance ladder (S/M/L/N), extracts structured failures from error output, and incrementally compacts long history into a DAG of summaries — all in a local SQLite database. The result is an agent that remembers prior decisions, avoids repeating prior failures, and survives compaction without losing project context.
+> Coding-specialized persistent memory for the Claude Code CLI.  
+> 中文文档: [README.zh-CN.md](./README.zh-CN.md)
 
-The plugin is designed around three coding-specific scenarios:
+CodeMemory is a local-first Claude Code plugin that turns per-session context into durable engineering memory. It stores conversations, summaries, decisions, constraints, failures, and fix attempts in SQLite, then injects the right context back into prompts and risky tool calls.
 
-1. **Long sessions** — keep stable requirements visible after sliding-window truncation.
-2. **Complex refactors** — preserve the design decisions and rejected alternatives that justify the current code.
-3. **Multi-round debugging** — recall prior failures and fix attempts before re-trying broken paths.
+CodeMemory is intentionally narrow: it is not a general-purpose RAG layer. It is optimized for long Claude Code sessions, complex refactors, and multi-round debugging loops where remembering prior intent matters more than broad document search.
 
-> Plugin name (registered with Claude Code): `codememory-plugin`.
-> npm package name (runtime): `codememory-for-claude`.
+> Registered Claude Code plugin name: `codememory-plugin`  
+> Runtime npm package name: `codememory-for-claude`
 
----
+## Contents
 
-## Features
+- [Why CodeMemory](#why-codememory)
+- [Quick Start](#quick-start)
+- [Default Workflow](#default-workflow)
+- [Architecture](#architecture)
+- [Repository Layout](#repository-layout)
+- [Configuration](#configuration)
+- [Tools, Skills, and Commands](#tools-skills-and-commands)
+- [Technical Overview](#technical-overview)
+- [Development](#development)
+- [Troubleshooting](#troubleshooting)
+- [Reference Docs](#reference-docs)
+- [License](#license)
 
-- **DAG-based compaction.** Long history is grouped into leaf summaries and one level of condensed summaries, replacing the lossy sliding-window compaction Claude Code does by default.
-- **Filter/Score tiers.** Every message is classified S (skeleton — full text), M (mutation metadata), L (lightweight fact), or N (noise). Compaction only touches M/L; retrieval prioritizes S.
-- **Memory nodes.** Structured entries — `task`, `constraint`, `decision`, `failure`, `fix_attempt`, `summary` — with tags, relations, and lifecycle status (`active` / `resolved` / `superseded` / `stale`).
-- **Prior-failure lookup on PreToolUse.** Before every Edit / Write / Bash, the daemon checks whether this file, command, or symbol has previously failed. If so, the model receives a short `additionalContext` warning describing the failure, the attempted fix, and the age of the record.
-- **Memory-first retrieval on UserPromptSubmit.** Each user prompt triggers a deterministic fast plan that pulls relevant tasks, constraints, decisions, and failures into the prompt. An optional LLM query planner kicks in when the fast plan recalls weakly.
-- **Stitched relation chains.** Memory nodes are connected via `relatedTo`, `supersedes`, `resolves`, etc. Retrieval can follow up to two hops to surface the rationale chain, not just isolated nodes.
-- **Two-path ingestion.** Hooks capture real-time events; a JSONL watcher tails `~/.claude/projects/<project>/<session>.jsonl` to pick up model responses (which have no hook) and replay prior sessions.
-- **Per-session daemon + cold-start fallback.** A background daemon serves a Unix socket for ~50 ms hot-path lookups; a CLI fallback handles cold start in 150–300 ms when the daemon isn't running.
-- **Skills-driven decision marking.** Three skills (`codememory-mark-decision`, `codememory-mark-task`, `codememory-mark-constraint`) let the model explicitly persist intent without polluting the chat thread.
+## Why CodeMemory
 
----
+CodeMemory is built for three recurring pain points in coding sessions:
 
-## Architecture at a glance
+1. **Long sessions**: keep stable requirements and constraints visible after context-window truncation.
+2. **Complex refactors**: preserve design rationale, rejected alternatives, and why the current approach won.
+3. **Multi-round debugging**: recall prior failures and fix attempts before repeating a broken path.
 
+## Highlights
+
+- **Local-first memory**: everything lives in `~/.claude/codememory.db`; no external service is required.
+- **Prompt-time retrieval**: every user prompt can pull relevant tasks, constraints, decisions, and failures into `additionalContext`.
+- **Prior-failure alerts**: before `Edit`, `Write`, or `Bash`, CodeMemory checks whether the target has failed before.
+- **DAG-based compaction**: long history is compacted into leaf and condensed summaries instead of being discarded.
+- **Structured memory nodes**: `task`, `constraint`, `decision`, `failure`, `fix_attempt`, and `summary` nodes with tags, relations, and lifecycle status.
+- **Fast runtime path**: a per-session daemon serves hot lookups over a Unix socket, with a CLI cold-start fallback where needed.
+- **Debuggable surface area**: hooks, tools, slash commands, and docs all map cleanly onto the same runtime model.
+
+## Quick Start
+
+### Prerequisites
+
+- Node.js 18 or newer
+- Claude Code CLI
+- `jq` and `curl` available on `PATH`
+
+### Install
+
+```bash
+git clone https://github.com/harrylettering/CodeMemory.git
+cd CodeMemory
+npm install
+npm run build
+chmod +x hooks/scripts/*.sh
 ```
+
+### Link it as a Claude Code plugin
+
+```bash
+mkdir -p ~/.claude/plugins
+ln -sf "$(pwd)" ~/.claude/plugins/codememory
+```
+
+The repository already contains `.claude-plugin/plugin.json` and `hooks/hooks.json`, so linking the repository root is enough.
+
+Restart Claude Code. On the next `SessionStart`, CodeMemory will initialize the SQLite database, start its per-session daemon, and begin watching the session transcript.
+
+## Default Workflow
+
+Once installed, CodeMemory runs mostly on its own:
+
+1. `SessionStart` initializes the database and starts a per-session daemon.
+2. The daemon tails the session JSONL so it can ingest model responses as well as hook events.
+3. Every `UserPromptSubmit` can trigger memory-first retrieval and inject relevant context into the prompt.
+4. Every `PreToolUse` checks for prior failures related to the file, command, or symbol being touched.
+5. As history grows, M/L-tier messages are compacted into a summary DAG and promoted into reusable memory nodes.
+
+## Architecture
+
+```text
 ┌────────────────────────────────────────────────────────────────────────┐
-│                          Claude Code session                            │
-│                                                                         │
-│  SessionStart ──► session-start.sh ──► daemon (per-session)             │
-│                                          ├─ JSONL watcher                │
-│                                          ├─ scorer (S/M/L/N)             │
-│                                          ├─ AsyncCompactor               │
-│                                          └─ unix socket                  │
-│                                                                         │
-│  UserPromptSubmit ─► /retrieval/onPrompt ─► retrieval engine ─► markdown │
-│  PreToolUse       ─► /failure/lookup     ─► prior-failure markdown      │
-│  PreCompact       ─► /compact            ─► AsyncCompactor              │
-│  SessionEnd       ─► daemon stop                                        │
-│                                                                         │
-│  Skills (mark-decision/task/constraint) ──► daemon /mark/*               │
+│                          Claude Code session                          │
+│                                                                       │
+│  SessionStart ──► session-start.sh ──► daemon (per-session)           │
+│                                          ├─ JSONL watcher             │
+│                                          ├─ scorer (S/M/L/N)          │
+│                                          ├─ AsyncCompactor            │
+│                                          └─ unix socket               │
+│                                                                       │
+│  UserPromptSubmit ─► /retrieval/onPrompt ─► retrieval engine          │
+│  PreToolUse       ─► /failure/lookup     ─► prior-failure warning     │
+│  PreCompact       ─► /compact            ─► AsyncCompactor            │
+│  SessionEnd       ─► daemon stop                                      │
+│                                                                       │
+│  Skills (mark-decision/task/constraint) ──► daemon /mark/*            │
 └────────────────────────────────────────────────────────────────────────┘
-                                    │
-                                    ▼
+                                   │
+                                   ▼
                 ┌────────────────────────────────────────┐
                 │   ~/.claude/codememory.db (SQLite)     │
                 │  conversations / messages / summaries  │
@@ -59,162 +115,138 @@ The plugin is designed around three coding-specific scenarios:
                 └────────────────────────────────────────┘
 ```
 
-For a deeper walk-through see [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md).
+For the full design walk-through, start with [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md).
 
----
+## Repository Layout
 
-## Installation
-
-### Prerequisites
-
-- Node.js ≥ 18
-- `jq` and `curl` on `$PATH` (used by hook scripts)
-- Claude Code CLI
-
-### Clone and build
-
-```bash
-git clone <repo-url> coding-agent-memory-system
-cd coding-agent-memory-system
-npm install
-npm run build
-chmod +x hooks/scripts/*.sh
-```
-
-### Link as a Claude Code plugin
-
-```bash
-mkdir -p ~/.claude/plugins
-ln -sf "$(pwd)" ~/.claude/plugins/codememory
-```
-
-Restart Claude Code so the plugin is loaded. On the next `SessionStart`, the daemon will spin up and a system message will confirm `CodeMemory initialized`.
-
----
+| Path | Purpose |
+|---|---|
+| `src/` | Core runtime: retrieval, compaction, stores, hooks runtime, and plugin activation. |
+| `hooks/` | Claude Code hook definitions and shell entrypoints. |
+| `commands/` | Slash-command descriptions such as `/codememory-status` and `/codememory-watch`. |
+| `skills/` | Skills for marking decisions, tasks, and constraints from the model side. |
+| `docs/` | Deeper architecture and subsystem references. |
+| `test/` | Automated tests for retrieval, lifecycle, failure lookup, compaction, and tools. |
+| `benchmark/` | Latency benchmark for the lookup path. |
 
 ## Configuration
 
-All knobs are environment variables; defaults live in `src/db/config.ts`.
+Defaults are defined in [src/db/config.ts](./src/db/config.ts). The most useful knobs are:
 
 | Variable | Default | Description |
 |---|---|---|
-| `CODEMEMORY_ENABLED` | `true` | Master kill-switch. |
-| `CODEMEMORY_DATABASE_PATH` | `~/.claude/codememory.db` | SQLite file. |
-| `CODEMEMORY_DEBUG_TOOLS_ENABLED` | `false` | Expose `codememory_grep` / `codememory_describe` / `codememory_expand` / `codememory_memory_*` to the model. |
-| `CODEMEMORY_COMPACTION_ENABLED` | `true` | Whether async compaction runs. |
-| `CODEMEMORY_COMPACTION_TOKEN_THRESHOLD` | `30000` | Uncompacted M/L tokens that trigger compaction. |
-| `CODEMEMORY_COMPACTION_FRESH_TAIL_COUNT` | `20` | Most-recent messages always exempt from compaction. |
-| `CODEMEMORY_COMPACTION_MODEL` | `claude-haiku-4-5-20251001` | Summarizer model. |
-| `CODEMEMORY_COMPACTION_DISABLE_LLM` | `false` | Skip `claude --print`; use truncation fallback (required offline / in tests). |
-| `CODEMEMORY_QUERY_PLANNER_ENABLED` | `false` | Enable the optional LLM query planner after a weak fast plan. |
-| `CODEMEMORY_AUTO_SUPERSEDE_VIA_LLM` | `false` | Run a haiku judge to detect implicit decision supersedes within a conversation. |
-| `CODEMEMORY_WORKSPACE_ROOT` | `process.cwd()` | Used to qualify file tags across repos. |
+| `CODEMEMORY_ENABLED` | `true` | Global on/off switch. |
+| `CODEMEMORY_DATABASE_PATH` | `~/.claude/codememory.db` | SQLite database location. |
+| `CODEMEMORY_DEBUG_TOOLS_ENABLED` | `false` | Expose grep/describe/expand/lifecycle admin tools to the model. |
+| `CODEMEMORY_COMPACTION_ENABLED` | `true` | Enable async compaction. |
+| `CODEMEMORY_COMPACTION_TOKEN_THRESHOLD` | `30000` | Uncompacted M/L token budget that triggers compaction. |
+| `CODEMEMORY_COMPACTION_FRESH_TAIL_COUNT` | `20` | Most-recent messages protected from compaction. |
+| `CODEMEMORY_COMPACTION_DISABLE_LLM` | `false` | Skip `claude --print` and use truncation fallback instead. |
+| `CODEMEMORY_QUERY_PLANNER_ENABLED` | `false` | Enable the optional LLM planner after weak fast-path retrieval. |
+| `CODEMEMORY_AUTO_SUPERSEDE_VIA_LLM` | `false` | Auto-detect implicit decision supersedes within a conversation. |
+| `CODEMEMORY_WORKSPACE_ROOT` | `process.cwd()` | Root used to qualify file tags across repositories. |
 
-See `src/db/config.ts` for the full list (ignore patterns, expansion model, query planner timeouts, explored-target window, etc.).
-
----
-
-## Tools and skills
+## Tools, Skills, and Commands
 
 ### Default model-callable tools
 
 | Tool | Purpose |
 |---|---|
-| `codememory_check_prior_failures` | Ask "have I failed on this file / command / symbol before?" before risky edits. |
-| `codememory_mark_decision` | Persist a meaningful technical decision as a `decision` memory node. |
-| `codememory_mark_requirement` | Persist a hard constraint or stable requirement. |
-| `codememory_compact` | Force-compact the current conversation now (also runs automatically on threshold). |
+| `codememory_check_prior_failures` | Ask whether a file, command, or symbol has failed before. |
+| `codememory_mark_decision` | Persist a meaningful technical decision as a `decision` node. |
+| `codememory_mark_requirement` | Persist a hard requirement or stable constraint. |
+| `codememory_compact` | Force compaction for the current conversation. |
 
-### Debug tools (`CODEMEMORY_DEBUG_TOOLS_ENABLED=true`)
+### Debug tools
 
-`codememory_grep`, `codememory_describe`, `codememory_expand`, `codememory_expand_query`, `codememory_memory_pending`, `codememory_memory_lifecycle`.
+Enable `CODEMEMORY_DEBUG_TOOLS_ENABLED=true` to expose:
+
+`codememory_grep`, `codememory_describe`, `codememory_expand`, `codememory_expand_query`, `codememory_memory_pending`, `codememory_memory_lifecycle`
 
 ### Skills
 
-`codememory-mark-decision`, `codememory-mark-task`, `codememory-mark-constraint`, `codememory-context-skill`, `codememory-summarization-skill`. Mark skills POST to the running daemon socket via `hooks/scripts/codememory-mark.sh`; the daemon is the single writer of `memory_nodes`.
+`codememory-mark-decision`, `codememory-mark-task`, `codememory-mark-constraint`, `codememory-context-skill`, `codememory-summarization-skill`
+
+The mark skills post through `hooks/scripts/codememory-mark.sh`, and the daemon remains the single writer for `memory_nodes`.
 
 ### Slash commands
 
-`/codememory-status`, `/codememory-grep`, `/codememory-describe`, `/codememory-expand`, `/codememory-expand-query`, `/codememory-watch` — see `commands/`.
+`/codememory-status`, `/codememory-grep`, `/codememory-describe`, `/codememory-expand`, `/codememory-expand-query`, `/codememory-watch`
 
----
+## Technical Overview
 
-## How retrieval works
+### Retrieval pipeline
 
-1. **Pivot extraction.** The user prompt is parsed for file paths, bash binaries, and identifiers (`HandleLogin`, `processPayment`, ...).
-2. **Fast plan.** A deterministic plan picks intent (`recall_decision_rationale`, `modify_and_avoid_prior_failure`, `continuation`, ...), wanted node kinds, and tag queries.
-3. **Memory-first lookup.** Tag-indexed query against `memory_nodes` returns scored candidates.
-4. **Relation stitching.** Up to two hops along whitelisted edges (`relatedTo`, `supersedes`, `resolves`) — intent-aware, e.g. "modify and avoid failure" prunes rationale-only branches.
-5. **Failure lookup (Path A).** `findFailuresByAnchors` against file/command/symbol pivots; results pass a confidence floor (`MIN_CONFIDENCE = 0.6`) and 30-day half-life decay.
-6. **Conversation Path B.** Falls back to keyword search across S-tier messages, with `[DECISION]`-prefixed lines bucketed separately.
-7. **Markdown injection.** A single block injected via `additionalContext`. Empty markdown means "skip injection".
+1. Extract pivots from the user prompt: file paths, bash binaries, and identifiers.
+2. Run a deterministic fast plan to choose intent, wanted node kinds, and tag queries.
+3. Query `memory_nodes` first through tag indexes.
+4. Stitch nearby rationale through relations such as `relatedTo`, `supersedes`, and `resolves`.
+5. Run prior-failure lookup against file, command, and symbol anchors.
+6. Fall back to S-tier conversation search when memory-node recall is weak.
+7. Inject a single markdown block through `additionalContext` when recall is strong enough.
 
-When the fast plan returns weakly *and* the prompt looks historical (asks "why", "earlier", etc.), an optional LLM planner extends the plan; failures fall back to the fast plan with a metric flag.
+### Compaction model
 
----
+1. Older M/L-tier messages are grouped once they exceed the compaction threshold.
+2. Each batch becomes a leaf summary through `claude --print`, or a truncation fallback when LLM compaction is disabled.
+3. Related leaves condense one level up into a depth-1 summary node.
+4. High-value summaries are also promoted into `memory_nodes(kind='summary')` so retrieval can reuse them.
 
-## How compaction works
-
-`AsyncCompactor` runs incrementally:
-
-1. M/L messages older than `compactionFreshTailCount` are grouped into batches that exceed `compactionTokenThreshold`.
-2. Each batch is sent to `claude --print` (`compactionModel = claude-haiku-4-5-20251001` by default) to produce a leaf summary. A truncation fallback applies when `CODEMEMORY_COMPACTION_DISABLE_LLM=true` or the LLM call fails.
-3. When enough leaves with the same parent accumulate (`leafMinFanout`), they condense one level up into a depth-1 summary.
-4. High-value summaries (decisions, root-cause language, failure traces) are also written as `memory_nodes` with `kind='summary'` so retrieval can surface them with the rest of the engineering memory.
-
-`codememory_compact` lets the model trigger this on demand. `PreCompact` and `SessionEnd` also flush.
-
----
-
-## Data model
+### Data model
 
 | Table | Purpose |
 |---|---|
-| `conversations` | One row per session. |
-| `conversation_messages` + `message_parts` | Tier-tagged messages and their typed parts. |
-| `summaries` + `summary_parents` | Leaf and condensed nodes of the compaction DAG. |
-| `memory_nodes` | Engineering memory: `task`, `constraint`, `decision`, `failure`, `fix_attempt`, `summary`. |
-| `memory_tags` | Index columns: `kind`, `file`, `command`, `symbol`, `signature`, `topic`, etc. |
-| `memory_relations` | Typed edges between memory nodes (`relatedTo`, `supersedes`, `resolves`, ...). |
+| `conversations` | One row per Claude Code session. |
+| `conversation_messages` + `message_parts` | Tier-tagged messages and structured parts. |
+| `summaries` + `summary_parents` | Leaf and condensed nodes in the summary DAG. |
+| `memory_nodes` | Durable engineering memory. |
+| `memory_tags` | Indexed tags such as `kind`, `file`, `command`, and `symbol`. |
+| `memory_relations` | Typed edges like `relatedTo`, `resolves`, and `supersedes`. |
 | `memory_lifecycle_events` | Status transition log. |
-| `memory_pending_updates` | Ambiguous resolves that need human review. |
-| `attempt_spans` | Edit/Write → validate-command pairing for fix-attempt tracking. |
-
-Failure nodes replace an earlier standalone `negative_experiences` table — see [`docs/PRIOR_FAILURE_REFERENCE.md`](./docs/PRIOR_FAILURE_REFERENCE.md).
-
----
+| `memory_pending_updates` | Ambiguous lifecycle updates that need review. |
+| `attempt_spans` | Edit/Write to validation-command pairings for fix-attempt tracking. |
 
 ## Development
 
 ```bash
 npm install
-npm run build              # tsc → dist/
+npm run build
 npm run build:watch
-npm test                   # vitest run --dir test
+npm test
 npm run test:watch
-npm run benchmark          # build + node benchmark/lookup-latency.ts
-npm run benchmark:ci       # CI gate, exit non-zero on p95 > 200ms
+npm run benchmark
+npm run benchmark:ci
+```
 
-# run a single test file
+Useful one-off commands:
+
+```bash
 npx vitest run test/failure-lookup.test.ts
-# run tests matching a name
 npx vitest run -t "stitched chain"
 ```
 
-The build only compiles `src/`; tests in `test/` import compiled modules via `.js` ESM paths (NodeNext) and Vitest runs TS directly. Hook scripts depend on `jq` and `curl`; the cold-start fallback additionally requires `dist/` to exist.
+Notes:
 
-In offline / CI environments set `CODEMEMORY_COMPACTION_DISABLE_LLM=true` so the compactor doesn't try to spawn `claude --print`.
+- The build compiles `src/` to `dist/`.
+- Hook scripts require `jq` and `curl`.
+- Prompt-time retrieval depends on the daemon and compiled `dist/`.
+- In offline or CI environments, set `CODEMEMORY_COMPACTION_DISABLE_LLM=true`.
 
----
+## Troubleshooting
 
-## Reference docs
+- **No retrieval or failure warnings appear**: make sure `npm run build` has been run, then restart Claude Code so hooks and `dist/` are available.
+- **Daemon does not start**: check `~/.claude/codememory-logs/session-start.log` and `~/.claude/codememory-logs/daemon.log`.
+- **Offline or CI hangs during compaction**: set `CODEMEMORY_COMPACTION_DISABLE_LLM=true`.
+- **Need to inspect runtime state**: use `/codememory-status` and review `~/.claude/codememory.db`.
 
-- [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md) — full system design.
-- [`docs/MEMORY_FIRST_RETRIEVAL_ARCHITECTURE.md`](./docs/MEMORY_FIRST_RETRIEVAL_ARCHITECTURE.md) — retrieval pipeline.
-- [`docs/MEMORY_NODE_LIFECYCLE.md`](./docs/MEMORY_NODE_LIFECYCLE.md) — node states, transitions, and lifecycle resolver.
-- [`docs/MEMORY_RETRIEVAL_REFERENCE.md`](./docs/MEMORY_RETRIEVAL_REFERENCE.md) — memory retrieval engine internals.
-- [`docs/PRIOR_FAILURE_REFERENCE.md`](./docs/PRIOR_FAILURE_REFERENCE.md) — failure capture, lookup, and confidence scoring.
-- [`docs/TOOL_SURFACE_REFERENCE.md`](./docs/TOOL_SURFACE_REFERENCE.md) — tool / skill / command surface.
+## Reference Docs
+
+- [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md): full system design
+- [docs/MEMORY_FIRST_RETRIEVAL_ARCHITECTURE.md](./docs/MEMORY_FIRST_RETRIEVAL_ARCHITECTURE.md): retrieval pipeline
+- [docs/MEMORY_NODE_LIFECYCLE.md](./docs/MEMORY_NODE_LIFECYCLE.md): node states and lifecycle rules
+- [docs/MEMORY_RETRIEVAL_REFERENCE.md](./docs/MEMORY_RETRIEVAL_REFERENCE.md): retrieval engine internals
+- [docs/PRIOR_FAILURE_REFERENCE.md](./docs/PRIOR_FAILURE_REFERENCE.md): failure capture and lookup
+- [docs/TOOL_SURFACE_REFERENCE.md](./docs/TOOL_SURFACE_REFERENCE.md): exposed tools, skills, and commands
 
 ## License
 

@@ -1,81 +1,65 @@
 # CodeMemory for Claude Code
 
-> 面向 Claude Code CLI 的「编码场景持久记忆」插件。
-> *English version: [README.md](./README.md)*
+[![Node.js 18+](https://img.shields.io/badge/Node.js-18%2B-339933?logo=node.js&logoColor=white)](#前置条件)
+[![TypeScript](https://img.shields.io/badge/TypeScript-ESM-3178C6?logo=typescript&logoColor=white)](#开发)
+[![SQLite](https://img.shields.io/badge/SQLite-local--first-003B57?logo=sqlite&logoColor=white)](#架构总览)
 
-CodeMemory 是一个 Claude Code 插件，将 Agent 单 session 内的临时上下文转换成可持久化、可检索的工程记忆。它捕获完整 session JSONL，将每条消息按四级重要性（S / M / L / N）打分，从错误输出中抽取结构化失败记录，并将长历史增量压缩成一棵 summary DAG —— 全部存放在本地 SQLite 中。其结果是：Agent 能记住先前的决策，避免重复犯过的错，并在 compaction 之后依然保留项目上下文。
+> 面向 Claude Code CLI 的编码场景持久记忆插件。  
+> English version: [README.md](./README.md)
 
-插件围绕三个编码场景做收敛：
+CodeMemory 是一个 local-first 的 Claude Code 插件，它把单个 session 内的临时上下文转成可持久化、可检索的工程记忆。它会把对话、摘要、决策、约束、失败和修复尝试落到 SQLite 中，再把真正相关的上下文注回到用户 prompt 和高风险工具调用前。
 
-1. **长 session** —— 在 sliding-window 截断之后，仍能稳定看到核心需求与约束。
-2. **复杂重构** —— 保留当前代码背后的设计决策与被否决的备选方案。
-3. **多轮调试** —— 在重新尝试已坏路径之前，召回先前的失败和修复尝试。
+CodeMemory 是一个刻意收窄边界的系统，不是通用 RAG。它主要针对 Claude Code 的长会话、复杂重构和多轮调试场景，让 Agent 记住之前做过什么、为什么这么做、哪里已经踩过坑。
 
-> Claude Code 注册的插件名：`codememory-plugin`。
-> npm 运行时包名：`codememory-for-claude`。
+> Claude Code 注册插件名：`codememory-plugin`  
+> npm 运行时包名：`codememory-for-claude`
 
----
+## 目录
 
-## 特性
+- [为什么需要 CodeMemory](#为什么需要-codememory)
+- [快速开始](#快速开始)
+- [默认工作流](#默认工作流)
+- [架构总览](#架构总览)
+- [仓库结构](#仓库结构)
+- [配置](#配置)
+- [工具、Skill 与命令](#工具skill-与命令)
+- [技术总览](#技术总览)
+- [开发](#开发)
+- [排障](#排障)
+- [参考文档](#参考文档)
+- [License](#license)
 
-- **DAG 压缩。** 长历史被分组为 leaf 摘要 + 一层 condensed 摘要，替代 Claude Code 默认的有损 sliding-window 压缩。
-- **Filter / Score 分层。** 每条消息被打成 S（skeleton — 完整文本）/ M（变更元数据）/ L（轻量 fact）/ N（噪音）。压缩只动 M/L，检索优先 S。
-- **Memory Node 模型。** 结构化记忆：`task`、`constraint`、`decision`、`failure`、`fix_attempt`、`summary`，附带 tag、relation 与生命周期状态（`active` / `resolved` / `superseded` / `stale`）。
-- **PreToolUse 阶段的失败查找。** 在每次 Edit / Write / Bash 之前，daemon 检查这个文件、命令或 symbol 是否曾经失败过。命中则通过 `additionalContext` 注入 markdown 警告，描述失败、修复尝试以及记录的年龄。
-- **UserPromptSubmit 阶段的 Memory-first 检索。** 每条用户 prompt 触发一次确定性 fast plan，把相关的 task、constraint、decision、failure 拉进 prompt。当 fast plan 召回过弱时，可选的 LLM query planner 接管补强。
-- **关系链拼接。** Memory node 之间通过 `relatedTo`、`supersedes`、`resolves` 等边相连。检索时可向外走最多两跳，把整条理由链而不只是孤立节点带回来。
-- **双路径写入。** Hook 实时捕获事件；JSONL watcher tail `~/.claude/projects/<project>/<session>.jsonl`，捕获那些没有 hook 的事件（典型如模型回复），并能回放先前 session。
-- **每 session daemon + 冷启动 fallback。** 后台 daemon 通过 Unix socket 提供约 50ms 的热路径查找；当 daemon 不可用时退化到 150–300ms 的 CLI 冷启动。
-- **Skill 驱动的标记入口。** 三个 skill（`codememory-mark-decision`、`codememory-mark-task`、`codememory-mark-constraint`）让模型能显式落库意图，而不污染对话主轨。
+## 为什么需要 CodeMemory
 
----
+CodeMemory 主要解决三类编码场景里的持续记忆问题：
 
-## 架构总览
+1. **长 session**：在上下文窗口被截断后，核心需求和约束仍然能继续被看见。
+2. **复杂重构**：保留设计理由、被否决方案和当前实现的决策轨迹。
+3. **多轮调试**：在再次尝试前召回之前失败过的文件、命令和修复路径。
 
-```
-┌────────────────────────────────────────────────────────────────────────┐
-│                         Claude Code session                             │
-│                                                                         │
-│  SessionStart ──► session-start.sh ──► daemon (per-session)             │
-│                                          ├─ JSONL watcher                │
-│                                          ├─ scorer (S/M/L/N)             │
-│                                          ├─ AsyncCompactor               │
-│                                          └─ unix socket                  │
-│                                                                         │
-│  UserPromptSubmit ─► /retrieval/onPrompt ─► retrieval engine ─► markdown │
-│  PreToolUse       ─► /failure/lookup     ─► prior-failure markdown      │
-│  PreCompact       ─► /compact            ─► AsyncCompactor              │
-│  SessionEnd       ─► daemon stop                                        │
-│                                                                         │
-│  Skills (mark-decision/task/constraint) ──► daemon /mark/*               │
-└────────────────────────────────────────────────────────────────────────┘
-                                    │
-                                    ▼
-                ┌────────────────────────────────────────┐
-                │   ~/.claude/codememory.db (SQLite)     │
-                │  conversations / messages / summaries  │
-                │  memory_nodes / memory_tags / relations│
-                │  lifecycle_events / pending_updates    │
-                └────────────────────────────────────────┘
-```
+## 核心亮点
 
-更深入的设计走读见 [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md)。
+- **本地优先**：所有数据都保存在 `~/.claude/codememory.db`，不依赖外部服务。
+- **Prompt 级检索**：每次用户提问都可以自动召回相关的 task、constraint、decision 和 failure。
+- **失败预警**：在 `Edit`、`Write`、`Bash` 前检查这个目标之前是否失败过。
+- **DAG 压缩**：长历史不会简单丢弃，而是压成 leaf summary 和 condensed summary。
+- **结构化记忆节点**：`task`、`constraint`、`decision`、`failure`、`fix_attempt`、`summary` 都有 tag、relation 和生命周期状态。
+- **快速运行路径**：每个 session 启一个 daemon，通过 Unix socket 提供热路径查找，并保留 CLI 冷启动兜底。
+- **可调试、可追踪**：hooks、tools、slash commands 和文档都围绕同一套运行模型组织。
 
----
-
-## 安装
+## 快速开始
 
 ### 前置条件
 
-- Node.js ≥ 18
-- `jq` 和 `curl` 在 `$PATH`（hook 脚本依赖）
+- Node.js 18 或更高版本
 - Claude Code CLI
+- `PATH` 中可用的 `jq` 与 `curl`
 
-### 克隆并构建
+### 安装
 
 ```bash
-git clone <repo-url> coding-agent-memory-system
-cd coding-agent-memory-system
+git clone https://github.com/harrylettering/CodeMemory.git
+cd CodeMemory
 npm install
 npm run build
 chmod +x hooks/scripts/*.sh
@@ -88,133 +72,181 @@ mkdir -p ~/.claude/plugins
 ln -sf "$(pwd)" ~/.claude/plugins/codememory
 ```
 
-重启 Claude Code 让插件生效。下一次 `SessionStart` 时，daemon 会自动起来，系统消息会确认 `CodeMemory initialized`。
+仓库中已经包含 `.claude-plugin/plugin.json` 和 `hooks/hooks.json`，因此直接把仓库根目录链接为插件目录即可。
 
----
+重启 Claude Code。下一次 `SessionStart` 时，CodeMemory 会初始化数据库、启动 per-session daemon，并开始监听当前 session 的 transcript。
+
+## 默认工作流
+
+安装完成后，CodeMemory 大部分时候会自动运行：
+
+1. `SessionStart` 初始化数据库并启动每 session 的 daemon。
+2. daemon tail 当前 session 的 JSONL，因此既能 ingest hook 事件，也能 ingest 模型回复。
+3. 每次 `UserPromptSubmit` 都可能触发 memory-first retrieval，把相关上下文注入 prompt。
+4. 每次 `PreToolUse` 都会检查当前文件、命令或 symbol 是否存在 prior failure。
+5. 随着历史增长，M/L-tier 消息会被异步压缩进 summary DAG，并提升为可复用的 memory node。
+
+## 架构总览
+
+```text
+┌────────────────────────────────────────────────────────────────────────┐
+│                          Claude Code session                          │
+│                                                                       │
+│  SessionStart ──► session-start.sh ──► daemon (per-session)           │
+│                                          ├─ JSONL watcher             │
+│                                          ├─ scorer (S/M/L/N)          │
+│                                          ├─ AsyncCompactor            │
+│                                          └─ unix socket               │
+│                                                                       │
+│  UserPromptSubmit ─► /retrieval/onPrompt ─► retrieval engine          │
+│  PreToolUse       ─► /failure/lookup     ─► prior-failure warning     │
+│  PreCompact       ─► /compact            ─► AsyncCompactor            │
+│  SessionEnd       ─► daemon stop                                      │
+│                                                                       │
+│  Skills (mark-decision/task/constraint) ──► daemon /mark/*            │
+└────────────────────────────────────────────────────────────────────────┘
+                                   │
+                                   ▼
+                ┌────────────────────────────────────────┐
+                │   ~/.claude/codememory.db (SQLite)     │
+                │  conversations / messages / summaries  │
+                │  memory_nodes / memory_tags / relations│
+                │  lifecycle_events / pending_updates    │
+                └────────────────────────────────────────┘
+```
+
+完整设计走读建议从 [docs/ARCHITECTURE.zh-CN.md](./docs/ARCHITECTURE.zh-CN.md) 开始。
+
+## 仓库结构
+
+| 路径 | 作用 |
+|---|---|
+| `src/` | 核心运行时：检索、压缩、store、hook runtime 和插件激活逻辑。 |
+| `hooks/` | Claude Code 的 hook 定义和 shell 入口脚本。 |
+| `commands/` | `/codememory-status`、`/codememory-watch` 等 slash command 描述。 |
+| `skills/` | 用于标记 decision、task、constraint 的 Skills。 |
+| `docs/` | 更深入的架构与子系统参考文档。 |
+| `test/` | 检索、生命周期、失败查找、压缩和工具的自动化测试。 |
+| `benchmark/` | 查找路径的延迟基准测试。 |
 
 ## 配置
 
-所有开关都是环境变量；默认值集中在 `src/db/config.ts`。
+默认值定义在 [src/db/config.ts](./src/db/config.ts)。最常用的环境变量如下：
 
 | 变量 | 默认值 | 说明 |
 |---|---|---|
-| `CODEMEMORY_ENABLED` | `true` | 总开关。 |
-| `CODEMEMORY_DATABASE_PATH` | `~/.claude/codememory.db` | SQLite 文件路径。 |
-| `CODEMEMORY_DEBUG_TOOLS_ENABLED` | `false` | 是否对模型暴露 `codememory_grep` / `codememory_describe` / `codememory_expand` / `codememory_memory_*` 等调试工具。 |
+| `CODEMEMORY_ENABLED` | `true` | 全局总开关。 |
+| `CODEMEMORY_DATABASE_PATH` | `~/.claude/codememory.db` | SQLite 数据库路径。 |
+| `CODEMEMORY_DEBUG_TOOLS_ENABLED` | `false` | 是否向模型暴露 grep/describe/expand/lifecycle 管理工具。 |
 | `CODEMEMORY_COMPACTION_ENABLED` | `true` | 是否启用异步 compaction。 |
 | `CODEMEMORY_COMPACTION_TOKEN_THRESHOLD` | `30000` | 触发 compaction 的未压缩 M/L token 阈值。 |
-| `CODEMEMORY_COMPACTION_FRESH_TAIL_COUNT` | `20` | 始终免疫压缩的最近消息条数。 |
-| `CODEMEMORY_COMPACTION_MODEL` | `claude-haiku-4-5-20251001` | 摘要生成所用模型。 |
-| `CODEMEMORY_COMPACTION_DISABLE_LLM` | `false` | 跳过 `claude --print`，使用截断 fallback（离线 / 测试场景必需）。 |
-| `CODEMEMORY_QUERY_PLANNER_ENABLED` | `false` | 启用 fast plan 召回过弱后的 LLM query planner。 |
-| `CODEMEMORY_AUTO_SUPERSEDE_VIA_LLM` | `false` | 用 haiku 判官检测 conversation 内的隐式 decision supersede。 |
-| `CODEMEMORY_WORKSPACE_ROOT` | `process.cwd()` | 跨仓库 file 标签归一化的根。 |
+| `CODEMEMORY_COMPACTION_FRESH_TAIL_COUNT` | `20` | 永远不参与压缩的最近消息条数。 |
+| `CODEMEMORY_COMPACTION_DISABLE_LLM` | `false` | 跳过 `claude --print`，改用截断 fallback。 |
+| `CODEMEMORY_QUERY_PLANNER_ENABLED` | `false` | fast-path 检索过弱时，启用可选 LLM planner。 |
+| `CODEMEMORY_AUTO_SUPERSEDE_VIA_LLM` | `false` | 在单个 conversation 内自动检测隐式 decision supersede。 |
+| `CODEMEMORY_WORKSPACE_ROOT` | `process.cwd()` | 用于跨仓库归一化 file tag 的根路径。 |
 
-完整列表（忽略模式、扩展模型、query planner 超时、explored-target 窗口等）见 `src/db/config.ts`。
+## 工具、Skill 与命令
 
----
-
-## 工具与 Skill
-
-### 默认对模型暴露的工具
+### 默认可被模型调用的工具
 
 | 工具 | 用途 |
 |---|---|
-| `codememory_check_prior_failures` | 在风险编辑前查询「这个文件 / 命令 / symbol 之前是否失败过」。 |
-| `codememory_mark_decision` | 把一个有意义的技术决策落成 `decision` memory node。 |
-| `codememory_mark_requirement` | 把一个硬约束 / 稳定需求落成 `constraint` memory node。 |
-| `codememory_compact` | 主动 force-compact 当前 conversation（达到阈值时也会自动触发）。 |
+| `codememory_check_prior_failures` | 查询某个文件、命令或 symbol 是否失败过。 |
+| `codememory_mark_decision` | 把技术决策持久化成 `decision` 节点。 |
+| `codememory_mark_requirement` | 把硬约束或稳定需求持久化。 |
+| `codememory_compact` | 主动触发当前 conversation 的 compaction。 |
 
-### 调试工具（`CODEMEMORY_DEBUG_TOOLS_ENABLED=true`）
+### 调试工具
 
-`codememory_grep`、`codememory_describe`、`codememory_expand`、`codememory_expand_query`、`codememory_memory_pending`、`codememory_memory_lifecycle`。
+设置 `CODEMEMORY_DEBUG_TOOLS_ENABLED=true` 后会暴露：
 
-### Skill
+`codememory_grep`、`codememory_describe`、`codememory_expand`、`codememory_expand_query`、`codememory_memory_pending`、`codememory_memory_lifecycle`
 
-`codememory-mark-decision`、`codememory-mark-task`、`codememory-mark-constraint`、`codememory-context-skill`、`codememory-summarization-skill`。Mark 类 Skill 通过 `hooks/scripts/codememory-mark.sh` 把请求 POST 到 daemon 的 socket，daemon 是 `memory_nodes` 的唯一写入者。
+### Skills
+
+`codememory-mark-decision`、`codememory-mark-task`、`codememory-mark-constraint`、`codememory-context-skill`、`codememory-summarization-skill`
+
+Mark 类 Skill 会通过 `hooks/scripts/codememory-mark.sh` 发送请求，而 daemon 仍然是 `memory_nodes` 的唯一写入者。
 
 ### Slash 命令
 
-`/codememory-status`、`/codememory-grep`、`/codememory-describe`、`/codememory-expand`、`/codememory-expand-query`、`/codememory-watch` —— 详见 `commands/`。
+`/codememory-status`、`/codememory-grep`、`/codememory-describe`、`/codememory-expand`、`/codememory-expand-query`、`/codememory-watch`
 
----
+## 技术总览
 
-## 检索流程
+### 检索流程
 
-1. **Pivot 抽取。** 从 prompt 中抽取文件路径、bash 二进制名、标识符（`HandleLogin`、`processPayment` …）。
-2. **Fast plan。** 一个确定性规划器选定意图（`recall_decision_rationale`、`modify_and_avoid_prior_failure`、`continuation` …）、想要的节点 kind 列表、tag 查询。
-3. **Memory-first 查找。** 借助 tag 索引在 `memory_nodes` 上查询，返回带分数的候选集。
-4. **Relation 拼接。** 沿着白名单边（`relatedTo`、`supersedes`、`resolves`）最多走两跳；意图感知，例如「modify and avoid failure」会修剪只描述理由的支链。
-5. **失败查找（Path A）。** `findFailuresByAnchors` 用 file / command / symbol pivot 命中失败节点；通过置信度下限（`MIN_CONFIDENCE = 0.6`）和 30 天半衰期时间衰减。
-6. **Conversation Path B。** 当上面两路不够时，在 S-tier 消息中做关键词检索；`[DECISION]` 前缀行单独成桶。
-7. **Markdown 注入。** 通过 `additionalContext` 注入一段 markdown；返回空 markdown 表示「跳过注入」。
+1. 从用户 prompt 中抽取 pivot：文件路径、bash 二进制名和标识符。
+2. 运行一个确定性的 fast plan，选出意图、目标节点类型和 tag 查询。
+3. 优先通过 tag index 查 `memory_nodes`。
+4. 沿着 `relatedTo`、`supersedes`、`resolves` 等边拼接相邻的理由链。
+5. 对文件、命令和 symbol 运行 prior-failure 查找。
+6. 当 memory-node 召回不够时，回落到 S-tier conversation 搜索。
+7. 只有在召回足够强时，才通过 `additionalContext` 注入单个 markdown 块。
 
-当 fast plan 召回过弱、且 prompt 看上去是历史性追问（"why"、"earlier" 等）时，可选 LLM planner 会扩展 plan；失败时回落到 fast plan，并打上 metric 标记。
+### Compaction 模型
 
----
+1. 更早的 M/L-tier 消息达到阈值后会被分组。
+2. 每组通过 `claude --print` 生成 leaf summary；若禁用 LLM compaction，则使用截断 fallback。
+3. 相关 leaf 会继续向上 condense 成一层 depth-1 summary。
+4. 高价值 summary 还会同步提升为 `memory_nodes(kind='summary')` 供后续检索复用。
 
-## Compaction 流程
-
-`AsyncCompactor` 增量执行：
-
-1. 比 `compactionFreshTailCount` 更早的 M/L 消息按 `compactionTokenThreshold` token 阈值分批。
-2. 每批送给 `claude --print`（默认 `compactionModel = claude-haiku-4-5-20251001`）生成 leaf 摘要。当 `CODEMEMORY_COMPACTION_DISABLE_LLM=true` 或 LLM 调用失败时，回落到截断 fallback。
-3. 当同一 parent 下积累到 `leafMinFanout` 个 leaf 时，向上 condense 出一层 depth=1 的摘要。
-4. 高价值摘要（含决策、根因语言、失败 trace 的）会同时落成 `kind='summary'` 的 memory node，让检索能把它们与其它工程记忆一同召回。
-
-`codememory_compact` 让模型可以按需触发。`PreCompact` 和 `SessionEnd` 也会冲刷一次。
-
----
-
-## 数据模型
+### 数据模型
 
 | 表 | 作用 |
 |---|---|
-| `conversations` | 每个 session 一行。 |
-| `conversation_messages` + `message_parts` | 带 tier 标签的消息及其分段。 |
-| `summaries` + `summary_parents` | Compaction DAG 的 leaf 与 condensed 节点。 |
-| `memory_nodes` | 工程记忆：`task`、`constraint`、`decision`、`failure`、`fix_attempt`、`summary`。 |
-| `memory_tags` | 索引列：`kind`、`file`、`command`、`symbol`、`signature`、`topic` 等。 |
-| `memory_relations` | memory node 之间的有类型边（`relatedTo`、`supersedes`、`resolves` …）。 |
-| `memory_lifecycle_events` | 状态变迁日志。 |
-| `memory_pending_updates` | 需要人工确认的歧义 resolve。 |
-| `attempt_spans` | Edit/Write → validate 命令的成对追踪，服务于 fix-attempt 关联。 |
-
-`failure` 节点取代了早期独立的 `negative_experiences` 表 —— 详见 [`docs/PRIOR_FAILURE_REFERENCE.md`](./docs/PRIOR_FAILURE_REFERENCE.md)。
-
----
+| `conversations` | 每个 Claude Code session 一行。 |
+| `conversation_messages` + `message_parts` | 带 tier 标签的消息及结构化分段。 |
+| `summaries` + `summary_parents` | summary DAG 里的 leaf 和 condensed 节点。 |
+| `memory_nodes` | 持久化工程记忆。 |
+| `memory_tags` | `kind`、`file`、`command`、`symbol` 等索引 tag。 |
+| `memory_relations` | `relatedTo`、`resolves`、`supersedes` 等有类型边。 |
+| `memory_lifecycle_events` | 状态流转日志。 |
+| `memory_pending_updates` | 需要人工确认的生命周期更新。 |
+| `attempt_spans` | 用于 fix-attempt 追踪的 Edit/Write 到验证命令配对。 |
 
 ## 开发
 
 ```bash
 npm install
-npm run build              # tsc → dist/
+npm run build
 npm run build:watch
-npm test                   # vitest run --dir test
+npm test
 npm run test:watch
-npm run benchmark          # build + node benchmark/lookup-latency.ts
-npm run benchmark:ci       # CI 闸门，p95 > 200ms 时非零退出
+npm run benchmark
+npm run benchmark:ci
+```
 
-# 跑单个测试文件
+常用单次命令：
+
+```bash
 npx vitest run test/failure-lookup.test.ts
-# 按名字匹配
 npx vitest run -t "stitched chain"
 ```
 
-构建只编译 `src/`；`test/` 目录用 NodeNext ESM 路径 `.js` 形式 import 编译产物，Vitest 直接运行 TS。Hook 脚本依赖 `jq` 与 `curl`；冷启动 fallback 还要求先 `npm run build` 让 `dist/` 存在。
+说明：
 
-在离线 / CI 环境下设置 `CODEMEMORY_COMPACTION_DISABLE_LLM=true`，避免 compactor 试图 spawn `claude --print`。
+- 构建会把 `src/` 编译到 `dist/`。
+- hook 脚本依赖 `jq` 与 `curl`。
+- prompt 级检索依赖 daemon 和编译后的 `dist/`。
+- 离线或 CI 环境建议设置 `CODEMEMORY_COMPACTION_DISABLE_LLM=true`。
 
----
+## 排障
+
+- **没有出现检索或失败预警**：先执行 `npm run build`，然后重启 Claude Code，确保 hooks 和 `dist/` 已生效。
+- **daemon 没有启动**：查看 `~/.claude/codememory-logs/session-start.log` 和 `~/.claude/codememory-logs/daemon.log`。
+- **离线或 CI 场景 compaction 卡住**：设置 `CODEMEMORY_COMPACTION_DISABLE_LLM=true`。
+- **需要查看运行状态**：使用 `/codememory-status`，并检查 `~/.claude/codememory.db`。
 
 ## 参考文档
 
-- [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md) —— 完整系统设计。
-- [`docs/MEMORY_FIRST_RETRIEVAL_ARCHITECTURE.md`](./docs/MEMORY_FIRST_RETRIEVAL_ARCHITECTURE.md) —— 检索 pipeline。
-- [`docs/MEMORY_NODE_LIFECYCLE.md`](./docs/MEMORY_NODE_LIFECYCLE.md) —— 节点状态、迁移、lifecycle resolver。
-- [`docs/MEMORY_RETRIEVAL_REFERENCE.md`](./docs/MEMORY_RETRIEVAL_REFERENCE.md) —— 检索引擎内部。
-- [`docs/PRIOR_FAILURE_REFERENCE.md`](./docs/PRIOR_FAILURE_REFERENCE.md) —— 失败捕获、查找与置信度评分。
-- [`docs/TOOL_SURFACE_REFERENCE.md`](./docs/TOOL_SURFACE_REFERENCE.md) —— 工具 / skill / 命令的暴露表面。
+- [docs/ARCHITECTURE.zh-CN.md](./docs/ARCHITECTURE.zh-CN.md)：完整系统设计
+- [docs/MEMORY_FIRST_RETRIEVAL_ARCHITECTURE.zh-CN.md](./docs/MEMORY_FIRST_RETRIEVAL_ARCHITECTURE.zh-CN.md)：检索 pipeline
+- [docs/MEMORY_NODE_LIFECYCLE.zh-CN.md](./docs/MEMORY_NODE_LIFECYCLE.zh-CN.md)：节点状态与生命周期规则
+- [docs/MEMORY_RETRIEVAL_REFERENCE.zh-CN.md](./docs/MEMORY_RETRIEVAL_REFERENCE.zh-CN.md)：检索引擎内部实现
+- [docs/PRIOR_FAILURE_REFERENCE.zh-CN.md](./docs/PRIOR_FAILURE_REFERENCE.zh-CN.md)：失败捕获与查找
+- [docs/TOOL_SURFACE_REFERENCE.zh-CN.md](./docs/TOOL_SURFACE_REFERENCE.zh-CN.md)：工具、Skill 和命令暴露面
 
 ## License
 

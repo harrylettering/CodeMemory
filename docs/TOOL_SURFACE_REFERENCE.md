@@ -1,23 +1,25 @@
 # Tool Surface Reference
 
-> 本文描述当前项目里真正暴露给模型、hook、daemon 的工具与接口表面。
+> Chinese version: [TOOL_SURFACE_REFERENCE.zh-CN.md](./TOOL_SURFACE_REFERENCE.zh-CN.md)
+>
+> This document describes the actual tools and interfaces currently exposed to the model, hooks, and daemon.
 
-## 1. 模型可调用工具
+## 1. Model-callable tools
 
-### 1.1 默认工具
+### 1.1 Default tools
 
-默认启用：
+Enabled by default:
 
 - `codememory_check_prior_failures`
 - `codememory_mark_decision`
 - `codememory_mark_requirement`
 - `codememory_compact`
 
-这些工具构成当前默认产品表面。
+These make up the default product-facing tool surface today.
 
-### 1.2 Debug / admin 工具
+### 1.2 Debug and admin tools
 
-仅当 `debugToolsEnabled=true` 时注册：
+Registered only when `debugToolsEnabled=true`:
 
 - `codememory_grep`
 - `codememory_describe`
@@ -26,11 +28,11 @@
 - `codememory_memory_pending`
 - `codememory_memory_lifecycle`
 
-它们的角色更偏排障、观察、手工调试，不是默认 workflow 的主入口。
+These are mainly for diagnosis, observability, and manual debugging. They are not intended to be the primary workflow surface.
 
-## 2. Hook 脚本
+## 2. Hook scripts
 
-当前项目 hook 侧的主要入口：
+The main hook-side entrypoints are:
 
 - `session-start.sh`
 - `user-prompt-submit.sh`
@@ -39,44 +41,44 @@
 - `final-compact.sh`
 - `session-end.sh`
 
-职责分别是：
+Their responsibilities are:
 
-- 启停 daemon
-- 请求 prompt retrieval
-- 查询 prior-failure 预警
-- 请求后台 compaction
+- starting and stopping the daemon
+- requesting prompt-time retrieval
+- checking prior-failure warnings
+- requesting background compaction
 
-## 3. Daemon socket 接口
+## 3. Daemon socket interfaces
 
-当前 daemon 对外暴露的内部接口：
+The daemon currently exposes the following internal interfaces:
 
 - `/retrieval/onPrompt`
-- `/failure/lookup`（保留 `/negexp/lookup` 作为兼容别名）
+- `/failure/lookup` with `/negexp/lookup` kept as a compatibility alias
 - `/compact`
 
-这些接口面向 hook 和本地运行时，不是模型直接调用的公开产品接口。
+These endpoints are intended for hooks and the local runtime. They are not public model-facing product APIs.
 
-## 4. 当前工具设计原则
+## 4. Tool design principles
 
-当前工具表面遵循三个原则：
+The current tool surface follows three principles:
 
-1. 默认表面小  
-   只保留最稳定、最有产品价值的工具
+1. Keep the default surface small.  
+   Only keep the most stable and highest-value tools on by default.
 
-2. 诊断能力留在 debug 后面  
-   grep / expand / lifecycle admin 仍然有价值，但不强行塞进默认路径
+2. Keep diagnostic power behind debug mode.  
+   Tools like grep, expand, and lifecycle admin are still valuable, but should not crowd the main path.
 
-3. 自动检索优先于手工检索  
-   目标是让系统主动在 prompt / tool use 阶段召回，而不是让模型频繁手工调用搜索工具
+3. Prefer automatic retrieval over manual retrieval.  
+   The goal is for the system to proactively recall context during prompt and tool-use stages, rather than forcing the model to search constantly by hand.
 
-## 5. 当前推荐使用顺序
+## 5. Recommended usage order
 
-对正常使用者而言，优先顺序是：
+For normal usage, the recommended order is:
 
-1. 自动 prompt retrieval
-2. `PreToolUse` 的 prior-failure warning
+1. automatic prompt retrieval
+2. `PreToolUse` prior-failure warning
 3. `codememory_mark_requirement`
 4. `codememory_mark_decision`
 5. `codememory_compact`
 
-只有在排障和系统调试时，才建议打开 debug tools。
+Enabling debug tools is mainly recommended when diagnosing the system itself.

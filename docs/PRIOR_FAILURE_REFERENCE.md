@@ -1,35 +1,37 @@
 # Prior Failure Reference
 
-> 本文描述「先前失败 (prior failure)」能力的职责、数据流与在统一 Memory Node 模型下的存储结构。
+> Chinese version: [PRIOR_FAILURE_REFERENCE.zh-CN.md](./PRIOR_FAILURE_REFERENCE.zh-CN.md)
+>
+> This document describes the responsibilities, data flow, and storage model of the "prior failure" capability under the unified Memory Node architecture.
 
-## 1. 定位
+## 1. Positioning
 
-Prior failure 不是通用记忆，而是专门服务于「避免重复犯错」的结构化失败记忆层。
+Prior failure is not general memory. It is a structured failure-memory layer dedicated to one job: preventing the agent from repeating known bad paths.
 
-它优先回答的问题是：
+It is optimized to answer questions like:
 
-- 这个文件以前是不是在这里报过错
-- 这个命令以前是不是失败过
-- 这个 symbol 以前是不是有同类问题
-- 这次修改是不是在重复之前的失败尝试
+- Has this file failed here before?
+- Has this command failed before?
+- Has this symbol caused a similar issue before?
+- Is this edit repeating a previous failed fix attempt?
 
-## 2. 存储模型
+## 2. Storage model
 
-旧版独立的 `negative_experiences` 表已被并入 `memory_nodes`，靠 `kind='failure'` 与 tag 索引区分：
+The old standalone `negative_experiences` table has been merged into `memory_nodes`, distinguished by `kind='failure'` plus tags:
 
-- `kind = 'failure'` 标识失败节点。
-- `metadata` 携带 `type / signature / raw / filePath / command / symbol / location / attemptedFix / seq` 等结构化字段。
-- `memory_tags` 写入 `kind='failure'`、`file=<path>`、`command=<bin>`、`symbol=<name>`、`signature=<norm>` 等多维标签，承担索引职责。
-- 状态走 `MemoryNodeStore` 的统一生命周期：`active` → `resolved` / `stale`，`reopen` 也走同一通道。
+- `kind = 'failure'` identifies a failure node.
+- `metadata` carries structured fields such as `type`, `signature`, `raw`, `filePath`, `command`, `symbol`, `location`, `attemptedFix`, and `seq`.
+- `memory_tags` writes multidimensional indexes such as `kind='failure'`, `file=<path>`, `command=<bin>`, `symbol=<name>`, and `signature=<normalized>`.
+- Status follows the shared lifecycle in `MemoryNodeStore`: `active -> resolved / stale`, with `reopen` using the same path.
 
-入口 API：
+Entry APIs:
 
-- `MemoryNodeStore.createFailureNode(input)` — 写入失败节点 + 标签 + lifecycle 事件。
-- `MemoryNodeStore.findFailuresByAnchors({ files, commands, symbols, signatures, statuses, limit })` — 主查询路径。
-- `MemoryNodeStore.resolveFailureNodesByTarget(...)` — 用户信号 / 修复成功后的目标级关闭。
-- `MemoryNodeStore.autoResolveStaleFailureNodes(...)` — 长期未复发的自动 resolve 扫描。
+- `MemoryNodeStore.createFailureNode(input)`: create the failure node, tags, and lifecycle event
+- `MemoryNodeStore.findFailuresByAnchors({ files, commands, symbols, signatures, statuses, limit })`: main lookup path
+- `MemoryNodeStore.resolveFailureNodesByTarget(...)`: close failures after user confirmation or a successful fix
+- `MemoryNodeStore.autoResolveStaleFailureNodes(...)`: periodically resolve failures that have not recurred for a long time
 
-## 3. 数据流
+## 3. Data flow
 
 ```text
 JSONL / tool result
@@ -37,48 +39,48 @@ JSONL / tool result
   -> signature normalization                   (src/negexp/signature.ts)
   -> memoryStore.createFailureNode             (kind='failure' memory node)
   -> lookupForPreToolUse / retrieveForPrompt   (src/failure-lookup.ts, src/retrieval.ts)
-  -> warning injection 或 prompt context
+  -> warning injection or prompt context
 ```
 
-`src/negexp/extractor.ts` 仍然存在并被复用，它只负责把原始报错文本解析成结构化字段；存储层完全走 `memory_nodes`。
+`src/negexp/extractor.ts` still exists and is reused. Its job is only to parse raw error text into structured fields; persistence is handled entirely by `memory_nodes`.
 
-## 4. 当前能力
+## 4. Current capabilities
 
-- error extraction & signature normalization
-- file / command / symbol / signature 多维 tag 查询 (`findFailuresByAnchors`)
-- confidence scoring + 30 天半衰期时间衰减 (`MIN_CONFIDENCE = 0.6`)
-- 用户信号驱动的 resolve、reopen
-- daemon 端的反洪水 debounce（同一 `nodeId` 60s 内不重复注入）
-- 跨 session 召回（默认行为）
+- error extraction and signature normalization
+- multi-dimensional tag lookup by file, command, symbol, and signature through `findFailuresByAnchors`
+- confidence scoring plus 30-day half-life decay (`MIN_CONFIDENCE = 0.6`)
+- user-signal-driven resolve and reopen
+- daemon-side debounce so the same `nodeId` is not injected repeatedly within 60 seconds
+- cross-session recall by default
 
-## 5. PreToolUse 行为
+## 5. PreToolUse behavior
 
-`PreToolUse` 是 prior-failure 最直接的价值体现。
+`PreToolUse` is the most visible user-facing value of prior failure.
 
-执行流程：
+Execution flow:
 
-1. 从工具输入提取 file / command / symbol
-2. 优先打 daemon hot path（`/failure/lookup`，保留 `/negexp/lookup` 作为兼容别名）
-3. fallback 到 cold path（`dist/failure-lookup-cli.js`）
-4. 通过 `scoreMatch` 做 confidence 过滤
-5. 结果强度足够时注入 markdown warning
+1. Extract file, command, and symbol anchors from tool input.
+2. Hit the daemon hot path first through `/failure/lookup` and keep `/negexp/lookup` as a compatibility alias.
+3. Fall back to the cold path `dist/failure-lookup-cli.js` when needed.
+4. Filter with `scoreMatch` confidence scoring.
+5. Inject a markdown warning when the result is strong enough.
 
-当前原则：
+Current rules:
 
-- 不因 hook 失败阻塞工具调用
-- 不把弱相关结果强塞给模型
-- 默认允许跨 session failure 召回
+- hook failures must never block tool execution
+- weak matches must not be force-injected
+- cross-session failure recall is allowed by default
 
-## 6. 与 Memory Node 的关系
+## 6. Relationship to Memory Nodes
 
-不再有「NegExp 或 Memory Node 二选一」的双层结构 —— failure 直接是 memory node 的一种 `kind`。
+There is no longer a two-layer "NegExp or Memory Node" model. A failure is simply one `kind` of memory node.
 
-- 检索：`RetrievalEngine.retrieveForPrompt` 的 Path A 直接通过 `findFailuresByAnchors` 拿失败节点；Memory-first 主检索同样能命中它们。
-- 生命周期：`LifecycleResolver` 直接读写 memory_nodes（`reopenFailure` / `resolveFailuresForSucceededAttempt` / `markSummaryStale`），无须双写。
-- 关系图：失败节点可参与 `memory_relations` 中的 `relatedTo / resolves` 等边，进入 stitched chain 等更高层能力。
+- Retrieval: Path A in `RetrievalEngine.retrieveForPrompt` fetches failure nodes directly through `findFailuresByAnchors`, and memory-first retrieval can also recall them.
+- Lifecycle: `LifecycleResolver` reads and writes `memory_nodes` directly through operations like `reopenFailure`, `resolveFailuresForSucceededAttempt`, and `markSummaryStale`.
+- Relation graph: failure nodes can participate in `memory_relations` such as `relatedTo` and `resolves`, so they can appear inside stitched chains.
 
-## 7. 当前边界
+## 7. Current boundaries
 
-1. 最擅长 failure avoidance，不负责完整表达需求、决策和任务状态 —— 这些走对应 `kind` 的 memory node。
-2. 主检索模型是 Memory-first，prior failure 是其中权重最高的一类信号，而不是独立通道。
-3. 更系统的离线评测和长期质量采样仍在补齐中。
+1. This layer is best at failure avoidance. It does not fully model requirements, decisions, or task state; those belong to other memory-node kinds.
+2. The overall retrieval model is memory-first. Prior failure is one of the strongest signals inside that model, not a separate standalone channel.
+3. Offline evaluation and long-term quality sampling still need more systematic work.
