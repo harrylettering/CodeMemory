@@ -18,5 +18,6 @@ node_modules/
 # Local Claude Code state
 /.claude/
 ~/.claude/
+CLAUDE.md
 codememory.db
 codememory.db.backup

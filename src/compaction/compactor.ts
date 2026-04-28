@@ -570,18 +570,11 @@ export class AsyncCompactor {
         // when this spawn runs from inside the daemon (or any Claude-invoked
         // process), otherwise the child reloads our own SessionStart hook
         // chain and restarts another daemon.
-        //
-        // TODO(api-migration): replace spawn("claude",...) with a direct
-        // Anthropic Messages API call (/v1/messages, model = compactionModel).
-        // Requires ANTHROPIC_API_KEY + a small HTTP client. Benefits: no child
-        // process, no reentrancy worry at all, no 30s timeout padding, no
-        // dependency on the user's `claude` binary being on PATH.
-        const raw = await spawnWithStdin(
-          "claude",
-          ["--bare", "--print", "--output-format", "text"],
-          prompt,
-          30_000
-        );
+        const args = ["--bare", "--print", "--output-format", "text"];
+        if (this.config.compactionModel) {
+          args.push("--model", this.config.compactionModel);
+        }
+        const raw = await spawnWithStdin("claude", args, prompt, 30_000);
         const firstParsed = parseSummaryWithMetadata(raw);
         const firstCheck = this.validateSummaryQuality(
           firstParsed.content,
@@ -602,12 +595,7 @@ export class AsyncCompactor {
           firstCheck,
           options
         );
-        const retryRaw = await spawnWithStdin(
-          "claude",
-          ["--bare", "--print", "--output-format", "text"],
-          retryPrompt,
-          30_000
-        );
+        const retryRaw = await spawnWithStdin("claude", args, retryPrompt, 30_000);
         const retryParsed = parseSummaryWithMetadata(retryRaw);
         const retryCheck = this.validateSummaryQuality(
           retryParsed.content,

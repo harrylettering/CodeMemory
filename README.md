@@ -131,20 +131,29 @@ For the full design walk-through, start with [docs/ARCHITECTURE.md](./docs/ARCHI
 
 ## Configuration
 
-Defaults are defined in [src/db/config.ts](./src/db/config.ts). The most useful knobs are:
+All configuration goes through `CODEMEMORY_*` environment variables resolved in [`src/db/config.ts`](./src/db/config.ts). The most useful knobs:
+
+Each model env var is configured independently. If you do not set it explicitly, each one defaults to `claude-haiku-4-5-20251001`.
 
 | Variable | Default | Description |
 |---|---|---|
 | `CODEMEMORY_ENABLED` | `true` | Global on/off switch. |
 | `CODEMEMORY_DATABASE_PATH` | `~/.claude/codememory.db` | SQLite database location. |
+| `CODEMEMORY_WORKSPACE_ROOT` | daemon's `cwd` at start | Root used to qualify file tags across repositories. |
 | `CODEMEMORY_DEBUG_TOOLS_ENABLED` | `false` | Expose grep/describe/expand/lifecycle admin tools to the model. |
 | `CODEMEMORY_COMPACTION_ENABLED` | `true` | Enable async compaction. |
 | `CODEMEMORY_COMPACTION_TOKEN_THRESHOLD` | `30000` | Uncompacted M/L token budget that triggers compaction. |
 | `CODEMEMORY_COMPACTION_FRESH_TAIL_COUNT` | `20` | Most-recent messages protected from compaction. |
-| `CODEMEMORY_COMPACTION_DISABLE_LLM` | `false` | Skip `claude --print` and use truncation fallback instead. |
+| `CODEMEMORY_COMPACTION_DISABLE_LLM` | `false` | Skip `claude --print` and use truncation fallback. Required offline / in CI. |
+| `CODEMEMORY_EXPANSION_MODEL` | `claude-haiku-4-5-20251001` | Model used by `codememory_expand` and `codememory_expand_query`. |
+| `CODEMEMORY_QUERY_PLANNER_MODEL` | `claude-haiku-4-5-20251001` | Model used by the optional query planner. |
+| `CODEMEMORY_COMPACTION_MODEL` | `claude-haiku-4-5-20251001` | Model used for compaction. |
+| `CODEMEMORY_AUTO_SUPERSEDE_MODEL` | `claude-haiku-4-5-20251001` | Model used by the optional auto-supersede judge. |
 | `CODEMEMORY_QUERY_PLANNER_ENABLED` | `false` | Enable the optional LLM planner after weak fast-path retrieval. |
 | `CODEMEMORY_AUTO_SUPERSEDE_VIA_LLM` | `false` | Auto-detect implicit decision supersedes within a conversation. |
-| `CODEMEMORY_WORKSPACE_ROOT` | `process.cwd()` | Root used to qualify file tags across repositories. |
+| `CODEMEMORY_EXPLORED_TARGET_WINDOW_MS` | `1800000` (30 min) | Repeat exploration of the same Read/Grep/Glob target inside this window decays L → N. |
+
+For the full reference (DAG-shape, expansion sub-agent, auto-supersede tuning, etc.) see [docs/CONFIGURATION.md](./docs/CONFIGURATION.md).
 
 ## Tools, Skills, and Commands
 
@@ -242,6 +251,7 @@ Notes:
 ## Reference Docs
 
 - [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md): full system design
+- [docs/CONFIGURATION.md](./docs/CONFIGURATION.md): full env-var reference
 - [docs/MEMORY_FIRST_RETRIEVAL_ARCHITECTURE.md](./docs/MEMORY_FIRST_RETRIEVAL_ARCHITECTURE.md): retrieval pipeline
 - [docs/MEMORY_NODE_LIFECYCLE.md](./docs/MEMORY_NODE_LIFECYCLE.md): node states and lifecycle rules
 - [docs/MEMORY_RETRIEVAL_REFERENCE.md](./docs/MEMORY_RETRIEVAL_REFERENCE.md): retrieval engine internals

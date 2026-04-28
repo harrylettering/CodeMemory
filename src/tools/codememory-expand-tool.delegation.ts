@@ -39,10 +39,13 @@ export class CodeMemoryExpansionDelegation {
         ? `<query_language>${params.queryLanguage}</query_language>\n${params.taskSummary}`
         : params.taskSummary;
 
+      const model =
+        this.deps.config.expansionModel ?? this.deps.config.compactionModel;
       const response = await spawnClaudePrint(
         prompt,
         SUBAGENT_SYSTEM_PROMPT,
-        params.timeoutMs ?? this.deps.config.delegationTimeoutMs ?? 120_000
+        params.timeoutMs ?? this.deps.config.delegationTimeoutMs ?? 120_000,
+        model
       );
 
       if (!response) {
@@ -72,21 +75,26 @@ export function createExpansionDelegation(deps: CodeMemoryDependencies): CodeMem
 function spawnClaudePrint(
   prompt: string,
   systemPrompt: string,
-  timeoutMs: number
+  timeoutMs: number,
+  model?: string
 ): Promise<string> {
   return new Promise((resolve, reject) => {
     // `--bare` keeps the subagent isolated from the parent session: it
     // skips our own SessionStart/PreToolUse/etc hooks and plugin sync, so
     // the child won't start another CodeMemory daemon against the same sqlite
     // file. Without this, expansion delegation was silently reentrant.
-    // TODO(api-migration): same as the compactor — replace this spawn
-    // with a direct Anthropic Messages API call once we add an HTTP
-    // client path.
-    const child = spawn(
-      "claude",
-      ["--bare", "--print", "--output-format", "text", "--append-system-prompt", systemPrompt],
-      { stdio: ["pipe", "pipe", "pipe"] }
-    );
+    const args = [
+      "--bare",
+      "--print",
+      "--output-format",
+      "text",
+      "--append-system-prompt",
+      systemPrompt,
+    ];
+    if (model) {
+      args.push("--model", model);
+    }
+    const child = spawn("claude", args, { stdio: ["pipe", "pipe", "pipe"] });
 
     const stdoutChunks: Buffer[] = [];
     const stderrChunks: Buffer[] = [];
