@@ -71,7 +71,7 @@ CodeMemory 主要解决三类编码场景里的持续记忆问题：
 
 ```text
 /plugin marketplace add harrylettering/CodeMemory
-/plugin install codememory-plugin@harrylettering-codememory
+/plugin install codememory-plugin@harrylettering-codememory-marketplace
 /reload-plugins
 ```
 

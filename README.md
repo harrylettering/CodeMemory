@@ -71,7 +71,7 @@ Open Claude Code in any project, then run:
 
 ```text
 /plugin marketplace add harrylettering/CodeMemory
-/plugin install codememory-plugin@harrylettering-codememory
+/plugin install codememory-plugin@harrylettering-codememory-marketplace
 /reload-plugins
 ```
 
