@@ -65,7 +65,19 @@ CodeMemory 主要解决三类编码场景里的持续记忆问题：
 - Claude Code CLI
 - `PATH` 中可用的 `jq` 与 `curl`
 
-### 安装
+### 通过 Marketplace 安装
+
+先在任意项目中启动 Claude Code，然后执行：
+
+```text
+/plugin marketplace add harrylettering/CodeMemory
+/plugin install codememory-plugin@harrylettering-codememory
+/reload-plugins
+```
+
+这个仓库现在通过 [`.claude-plugin/marketplace.json`](./.claude-plugin/marketplace.json) 兼作自己的 marketplace，因此不需要额外再建一个 catalog 仓库，也能走 Claude Code 的标准 marketplace 安装流程。
+
+### 通过源码安装（开发用）
 
 ```bash
 git clone https://github.com/harrylettering/CodeMemory.git
@@ -73,16 +85,12 @@ cd CodeMemory
 npm install
 npm run build
 chmod +x hooks/scripts/*.sh
-```
 
-### 链接到 Claude Code 插件目录
-
-```bash
 mkdir -p ~/.claude/plugins
 ln -sf "$(pwd)" ~/.claude/plugins/codememory
 ```
 
-仓库中已经包含 `.claude-plugin/plugin.json` 和 `hooks/hooks.json`，因此直接把仓库根目录链接为插件目录即可。
+仓库中已经包含 `.claude-plugin/plugin.json`、`.claude-plugin/marketplace.json` 和 `hooks/hooks.json`，因此做本地开发时，直接把仓库根目录链接为插件目录即可。
 
 重启 Claude Code。下一次 `SessionStart` 时，CodeMemory 会初始化数据库、启动 per-session daemon，并开始监听当前 session 的 transcript。
 
@@ -153,7 +161,6 @@ Mark 类 Skill 会通过 `hooks/scripts/codememory-mark.sh` 发送请求，而 d
 
 - [README.md](./README.md)：English README
 - [docs/CONFIGURATION.zh-CN.md](./docs/CONFIGURATION.zh-CN.md)：完整环境变量参考
-- [docs/CONFIGURATION.md](./docs/CONFIGURATION.md)：English configuration reference
 
 ## 开发
 
@@ -192,6 +199,7 @@ npx vitest run -t "stitched chain"
 - hook 脚本依赖 `jq` 与 `curl`。
 - prompt 级检索依赖 daemon 和编译后的 `dist/`。
 - 离线或 CI 环境建议设置 `CODEMEMORY_COMPACTION_DISABLE_LLM=true`。
+- 如果你发布了新版本，记得同步提升 [`.claude-plugin/plugin.json`](./.claude-plugin/plugin.json) 里的 `version`，这样已安装用户才能收到更新。
 
 ## 排障
 

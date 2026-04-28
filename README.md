@@ -65,7 +65,19 @@ CodeMemory is built for three recurring pain points in coding sessions:
 - Claude Code CLI
 - `jq` and `curl` available on `PATH`
 
-### Install
+### Install from Marketplace
+
+Open Claude Code in any project, then run:
+
+```text
+/plugin marketplace add harrylettering/CodeMemory
+/plugin install codememory-plugin@harrylettering-codememory
+/reload-plugins
+```
+
+This repository now doubles as its own marketplace through [`.claude-plugin/marketplace.json`](./.claude-plugin/marketplace.json), so you can distribute the plugin through Claude Code's standard marketplace flow without a separate catalog repository.
+
+### Install from Source for Development
 
 ```bash
 git clone https://github.com/harrylettering/CodeMemory.git
@@ -73,16 +85,12 @@ cd CodeMemory
 npm install
 npm run build
 chmod +x hooks/scripts/*.sh
-```
 
-### Link it as a Claude Code plugin
-
-```bash
 mkdir -p ~/.claude/plugins
 ln -sf "$(pwd)" ~/.claude/plugins/codememory
 ```
 
-The repository already contains `.claude-plugin/plugin.json` and `hooks/hooks.json`, so linking the repository root is enough.
+The repository already contains `.claude-plugin/plugin.json`, `.claude-plugin/marketplace.json`, and `hooks/hooks.json`, so linking the repository root is enough for local development.
 
 Restart Claude Code. On the next `SessionStart`, CodeMemory will initialize the SQLite database, start its per-session daemon, and begin watching the session transcript.
 
@@ -153,7 +161,6 @@ The mark skills post through `hooks/scripts/codememory-mark.sh`, and the daemon 
 
 - [README.zh-CN.md](./README.zh-CN.md): Chinese README
 - [docs/CONFIGURATION.md](./docs/CONFIGURATION.md): full environment-variable reference
-- [docs/CONFIGURATION.zh-CN.md](./docs/CONFIGURATION.zh-CN.md): 中文配置参考
 
 ## Development
 
@@ -192,6 +199,7 @@ Notes:
 - Hook scripts require `jq` and `curl`.
 - Prompt-time retrieval depends on the daemon and compiled `dist/`.
 - In offline or CI environments, set `CODEMEMORY_COMPACTION_DISABLE_LLM=true`.
+- If you publish an update, bump the version in [`.claude-plugin/plugin.json`](./.claude-plugin/plugin.json) so installed users receive the new release.
 
 ## Troubleshooting
 
