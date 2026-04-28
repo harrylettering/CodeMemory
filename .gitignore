@@ -1,9 +1,11 @@
 # Build artifacts
-dist/
+# We commit compiled JS under dist/ for Claude Code marketplace releases.
 *.js
 *.js.map
 *.d.ts
 *.d.ts.map
+!dist/
+!dist/**/*.js
 !src/**/*.d.ts
 
 # Dependencies

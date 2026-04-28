@@ -3,7 +3,8 @@
   "version": "0.1.0",
   "description": "CodeMemory for Claude Code CLI",
   "type": "module",
-  "main": "index.ts",
+  "main": "dist/plugin/index.js",
+  "exports": "./dist/plugin/index.js",
   "license": "MIT",
   "author": "harry <harlihao>",
   "keywords": [
@@ -21,16 +22,21 @@
     "test:watch": "vitest watch --dir test",
     "build": "tsc",
     "build:watch": "tsc --watch",
+    "plugin:validate": "claude plugin validate .",
+    "plugin:release-check": "npm run build && claude plugin validate .",
     "lint": "eslint src/**/*.ts",
     "benchmark": "npm run build && node benchmark/lookup-latency.ts",
     "benchmark:ci": "npm run build && node benchmark/lookup-latency.ts --ci"
   },
   "files": [
-    "index.ts",
+    ".claude-plugin/",
+    "hooks/",
+    "dist/**/*.js",
     "src/**/*.ts",
     "SKILL.md",
     "docs/",
     "README.md",
+    "README.zh-CN.md",
     "LICENSE"
   ],
   "dependencies": {

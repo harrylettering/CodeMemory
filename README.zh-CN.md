@@ -77,6 +77,8 @@ CodeMemory 主要解决三类编码场景里的持续记忆问题：
 
 这个仓库现在通过 [`.claude-plugin/marketplace.json`](./.claude-plugin/marketplace.json) 兼作自己的 marketplace，因此不需要额外再建一个 catalog 仓库，也能走 Claude Code 的标准 marketplace 安装流程。
 
+由于运行时 hooks 会直接执行 `dist/` 中编译后的 JavaScript，所以 marketplace 发布时必须把 `dist/*.js` 一起提交到 Git。
+
 ### 通过源码安装（开发用）
 
 ```bash
@@ -176,6 +178,14 @@ Mark 类 Skill 会通过 `hooks/scripts/codememory-mark.sh` 发送请求，而 d
 | `test/` | 检索、生命周期、失败查找、压缩和工具的自动化测试。 |
 | `benchmark/` | 查找路径的延迟基准测试。 |
 
+### Marketplace 发版检查清单
+
+1. 如果依赖有变化，先执行 `npm install`。
+2. 执行 `npm run plugin:release-check`。
+3. 提交更新后的 `dist/*.js`，并和源码改动一起入库。
+4. 提升 [`.claude-plugin/plugin.json`](./.claude-plugin/plugin.json) 里的版本号。
+5. 推送到 GitHub 后，再让用户通过 marketplace 安装或升级。
+
 ```bash
 npm install
 npm run build
@@ -196,6 +206,7 @@ npx vitest run -t "stitched chain"
 说明：
 
 - 构建会把 `src/` 编译到 `dist/`。
+- Claude Code 运行时 hooks 依赖已经提交到仓库里的 `dist/*.js`。
 - hook 脚本依赖 `jq` 与 `curl`。
 - prompt 级检索依赖 daemon 和编译后的 `dist/`。
 - 离线或 CI 环境建议设置 `CODEMEMORY_COMPACTION_DISABLE_LLM=true`。

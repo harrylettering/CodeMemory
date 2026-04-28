@@ -77,6 +77,8 @@ Open Claude Code in any project, then run:
 
 This repository now doubles as its own marketplace through [`.claude-plugin/marketplace.json`](./.claude-plugin/marketplace.json), so you can distribute the plugin through Claude Code's standard marketplace flow without a separate catalog repository.
 
+Because the runtime hooks execute compiled JavaScript from `dist/`, marketplace releases must include committed `dist/*.js` files in Git.
+
 ### Install from Source for Development
 
 ```bash
@@ -176,6 +178,14 @@ The mark skills post through `hooks/scripts/codememory-mark.sh`, and the daemon 
 | `test/` | Automated tests for retrieval, lifecycle, failure lookup, compaction, and tools. |
 | `benchmark/` | Latency benchmark for the lookup path. |
 
+### Marketplace Release Checklist
+
+1. Run `npm install` if dependencies changed.
+2. Run `npm run plugin:release-check`.
+3. Commit the updated `dist/*.js` output together with your source changes.
+4. Bump the version in [`.claude-plugin/plugin.json`](./.claude-plugin/plugin.json).
+5. Push to GitHub before asking users to install or update from the marketplace.
+
 ```bash
 npm install
 npm run build
@@ -196,6 +206,7 @@ npx vitest run -t "stitched chain"
 Notes:
 
 - The build compiles `src/` to `dist/`.
+- Claude Code runtime hooks depend on committed `dist/*.js` files.
 - Hook scripts require `jq` and `curl`.
 - Prompt-time retrieval depends on the daemon and compiled `dist/`.
 - In offline or CI environments, set `CODEMEMORY_COMPACTION_DISABLE_LLM=true`.
