@@ -1,30 +1,43 @@
 # CodeMemory for Claude Code
 
-[![Node.js 18+](https://img.shields.io/badge/Node.js-18%2B-339933?logo=node.js&logoColor=white)](#前置条件)
-[![TypeScript](https://img.shields.io/badge/TypeScript-ESM-3178C6?logo=typescript&logoColor=white)](#开发)
-[![SQLite](https://img.shields.io/badge/SQLite-local--first-003B57?logo=sqlite&logoColor=white)](#配置)
+[English](./README.md) | [简体中文](./README.zh-CN.md)
 
-> 面向 Claude Code CLI 的编码场景持久记忆插件。  
-> English version: [README.md](./README.md)
+<p align="center">
+  <strong>面向 Claude Code 的持久化工程记忆。</strong>
+</p>
+
+<p align="center">
+  把决策、约束、失败记录和压缩摘要存进本地 SQLite，再在长会话、复杂重构和多轮调试中把真正相关的上下文带回来。
+</p>
+
+<p align="center">
+  <a href="https://github.com/harrylettering/CodeMemory/stargazers">Star on GitHub</a>
+  ·
+  <a href="#快速开始">快速开始</a>
+  ·
+  <a href="#功能亮点">功能亮点</a>
+  ·
+  <a href="#配置">配置</a>
+  ·
+  <a href="#工具入口">工具</a>
+  ·
+  <a href="#开发">开发</a>
+</p>
+
+<p align="center">
+  <a href="https://github.com/harrylettering/CodeMemory/stargazers"><img src="https://img.shields.io/github/stars/harrylettering/CodeMemory?style=flat-square" alt="GitHub stars" /></a>
+  <img src="https://img.shields.io/badge/Claude%20Code-Plugin-black" alt="Claude Code Plugin" />
+  <img src="https://img.shields.io/badge/SQLite-Local%20First-003B57" alt="SQLite Local First" />
+  <img src="https://img.shields.io/badge/Persistent-Memory-1f6feb" alt="Persistent Memory" />
+  <img src="https://img.shields.io/badge/license-MIT-blue" alt="MIT License" />
+</p>
 
 CodeMemory 是一个 local-first 的 Claude Code 插件，它把单个 session 内的临时上下文转成可持久化、可检索的工程记忆。它会把对话、摘要、决策、约束、失败和修复尝试落到 SQLite 中，再把真正相关的上下文注回到用户 prompt 和高风险工具调用前。
 
 CodeMemory 是一个刻意收窄边界的系统，不是通用 RAG。它主要针对 Claude Code 的长会话、复杂重构和多轮调试场景，让 Agent 记住之前做过什么、为什么这么做、哪里已经踩过坑。
 
-> Claude Code 注册插件名：`codememory-plugin`  
-> npm 运行时包名：`codememory-for-claude`
-
-## 目录
-
-- [为什么需要 CodeMemory](#为什么需要-codememory)
-- [快速开始](#快速开始)
-- [默认工作流](#默认工作流)
-- [仓库结构](#仓库结构)
-- [配置](#配置)
-- [工具、Skill 与命令](#工具skill-与命令)
-- [开发](#开发)
-- [排障](#排障)
-- [License](#license)
+- Claude Code 插件名：`codememory-plugin`
+- npm 运行时包名：`codememory-for-claude`
 
 ## 为什么需要 CodeMemory
 
@@ -34,7 +47,7 @@ CodeMemory 主要解决三类编码场景里的持续记忆问题：
 2. **复杂重构**：保留设计理由、被否决方案和当前实现的决策轨迹。
 3. **多轮调试**：在再次尝试前召回之前失败过的文件、命令和修复路径。
 
-## 核心亮点
+## 功能亮点
 
 - **本地优先**：所有数据都保存在 `~/.claude/codememory.db`，不依赖外部服务。
 - **Prompt 级检索**：每次用户提问都可以自动召回相关的 task、constraint、decision 和 failure。
@@ -73,7 +86,7 @@ ln -sf "$(pwd)" ~/.claude/plugins/codememory
 
 重启 Claude Code。下一次 `SessionStart` 时，CodeMemory 会初始化数据库、启动 per-session daemon，并开始监听当前 session 的 transcript。
 
-## 默认工作流
+## 安装后会发生什么
 
 安装完成后，CodeMemory 大部分时候会自动运行：
 
@@ -82,18 +95,6 @@ ln -sf "$(pwd)" ~/.claude/plugins/codememory
 3. 每次 `UserPromptSubmit` 都可能触发 memory-first retrieval，把相关上下文注入 prompt。
 4. 每次 `PreToolUse` 都会检查当前文件、命令或 symbol 是否存在 prior failure。
 5. 随着历史增长，M/L-tier 消息会被异步压缩进 summary DAG，并提升为可复用的 memory node。
-
-## 仓库结构
-
-| 路径 | 作用 |
-|---|---|
-| `src/` | 核心运行时：检索、压缩、store、hook runtime 和插件激活逻辑。 |
-| `hooks/` | Claude Code 的 hook 定义和 shell 入口脚本。 |
-| `commands/` | `/codememory-status`、`/codememory-watch` 等 slash command 描述。 |
-| `skills/` | 用于标记 decision、task、constraint 的 Skills。 |
-| `docs/` | 面向使用者的中英文配置参考。 |
-| `test/` | 检索、生命周期、失败查找、压缩和工具的自动化测试。 |
-| `benchmark/` | 查找路径的延迟基准测试。 |
 
 ## 配置
 
@@ -121,7 +122,7 @@ ln -sf "$(pwd)" ~/.claude/plugins/codememory
 
 完整环境变量参考见 [docs/CONFIGURATION.zh-CN.md](./docs/CONFIGURATION.zh-CN.md)。
 
-## 工具、Skill 与命令
+## 工具入口
 
 ### 默认可被模型调用的工具
 
@@ -148,7 +149,25 @@ Mark 类 Skill 会通过 `hooks/scripts/codememory-mark.sh` 发送请求，而 d
 
 `/codememory-status`、`/codememory-grep`、`/codememory-describe`、`/codememory-expand`、`/codememory-expand-query`、`/codememory-watch`
 
+## 文档
+
+- [README.md](./README.md)：English README
+- [docs/CONFIGURATION.zh-CN.md](./docs/CONFIGURATION.zh-CN.md)：完整环境变量参考
+- [docs/CONFIGURATION.md](./docs/CONFIGURATION.md)：English configuration reference
+
 ## 开发
+
+### 仓库结构
+
+| 路径 | 作用 |
+|---|---|
+| `src/` | 核心运行时：检索、压缩、store、hook runtime 和插件激活逻辑。 |
+| `hooks/` | Claude Code 的 hook 定义和 shell 入口脚本。 |
+| `commands/` | `/codememory-status`、`/codememory-watch` 等 slash command 描述。 |
+| `skills/` | 用于标记 decision、task、constraint 的 Skills。 |
+| `docs/` | 面向使用者的中英文配置参考。 |
+| `test/` | 检索、生命周期、失败查找、压缩和工具的自动化测试。 |
+| `benchmark/` | 查找路径的延迟基准测试。 |
 
 ```bash
 npm install

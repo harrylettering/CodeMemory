@@ -1,21 +1,43 @@
 # CodeMemory for Claude Code
 
-[![Node.js 18+](https://img.shields.io/badge/Node.js-18%2B-339933?logo=node.js&logoColor=white)](#prerequisites)
-[![TypeScript](https://img.shields.io/badge/TypeScript-ESM-3178C6?logo=typescript&logoColor=white)](#development)
-[![SQLite](https://img.shields.io/badge/SQLite-local--first-003B57?logo=sqlite&logoColor=white)](#configuration)
+[English](./README.md) | [简体中文](./README.zh-CN.md)
 
-Coding-specialized persistent memory for the Claude Code CLI.
+<p align="center">
+  <strong>Persistent engineering memory for Claude Code.</strong>
+</p>
 
-中文文档：[README.zh-CN.md](./README.zh-CN.md)
+<p align="center">
+  Store decisions, constraints, failures, and compacted summaries in local SQLite, then bring the right context back into long sessions, complex refactors, and debugging loops.
+</p>
+
+<p align="center">
+  <a href="https://github.com/harrylettering/CodeMemory/stargazers">Star on GitHub</a>
+  ·
+  <a href="#quick-start">Quick Start</a>
+  ·
+  <a href="#feature-highlights">Feature Highlights</a>
+  ·
+  <a href="#configuration">Configuration</a>
+  ·
+  <a href="#tooling-surface">Tools</a>
+  ·
+  <a href="#development">Development</a>
+</p>
+
+<p align="center">
+  <a href="https://github.com/harrylettering/CodeMemory/stargazers"><img src="https://img.shields.io/github/stars/harrylettering/CodeMemory?style=flat-square" alt="GitHub stars" /></a>
+  <img src="https://img.shields.io/badge/Claude%20Code-Plugin-black" alt="Claude Code Plugin" />
+  <img src="https://img.shields.io/badge/SQLite-Local%20First-003B57" alt="SQLite Local First" />
+  <img src="https://img.shields.io/badge/Persistent-Memory-1f6feb" alt="Persistent Memory" />
+  <img src="https://img.shields.io/badge/license-MIT-blue" alt="MIT License" />
+</p>
 
 CodeMemory is a local-first Claude Code plugin that turns per-session context into durable engineering memory. It stores conversations, summaries, decisions, constraints, failures, and fix attempts in SQLite, then injects the right context back into prompts and risky tool calls.
 
 CodeMemory is intentionally narrow: it is not a general-purpose RAG layer. It is optimized for long Claude Code sessions, complex refactors, and multi-round debugging loops where remembering prior intent matters more than broad document search.
 
-| Item | Value |
-|---|---|
-| Claude Code plugin | `codememory-plugin` |
-| npm package | `codememory-for-claude` |
+- Claude Code plugin: `codememory-plugin`
+- npm package: `codememory-for-claude`
 
 ## Why CodeMemory
 
@@ -25,7 +47,7 @@ CodeMemory is built for three recurring pain points in coding sessions:
 2. **Complex refactors**: preserve design rationale, rejected alternatives, and why the current approach won.
 3. **Multi-round debugging**: recall prior failures and fix attempts before repeating a broken path.
 
-## Features
+## Feature Highlights
 
 - **Local-first memory**: everything lives in `~/.claude/codememory.db`; no external service is required.
 - **Prompt-time retrieval**: every user prompt can pull relevant tasks, constraints, decisions, and failures into `additionalContext`.
