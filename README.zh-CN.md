@@ -57,6 +57,12 @@ CodeMemory 主要解决三类编码场景里的持续记忆问题：
 - **快速运行路径**：每个 session 启一个 daemon，通过 Unix socket 提供热路径查找，并保留 CLI 冷启动兜底。
 - **可调试、可追踪**：hooks、tools、slash commands 都围绕同一套运行模型组织。
 
+## 架构信息图
+
+<p align="center">
+  <img src="./docs/assets/codememory-architecture-zh.png" alt="CodeMemory 项目架构信息图" width="1200" />
+</p>
+
 ## 快速开始
 
 ### 前置条件

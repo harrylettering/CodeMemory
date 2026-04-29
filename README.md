@@ -57,6 +57,12 @@ CodeMemory is built for three recurring pain points in coding sessions:
 - **Fast runtime path**: a per-session daemon serves hot lookups over a Unix socket, with a CLI cold-start fallback where needed.
 - **Debuggable surface area**: hooks, tools, and slash commands map cleanly onto the same runtime model.
 
+## Architecture Infographic
+
+<p align="center">
+  <img src="./docs/assets/codememory-architecture-en.png" alt="CodeMemory Architecture Infographic" width="1200" />
+</p>
+
 ## Quick Start
 
 ### Prerequisites
