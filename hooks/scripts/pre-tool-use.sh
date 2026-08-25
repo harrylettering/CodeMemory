@@ -62,7 +62,10 @@ if [ -z "$RESPONSE" ] \
    && command -v node >/dev/null 2>&1 \
    && [ -n "${CLAUDE_PLUGIN_ROOT:-}" ] \
    && [ -f "${CLAUDE_PLUGIN_ROOT}/dist/failure-lookup-cli.js" ]; then
-  RESPONSE=$(node "${CLAUDE_PLUGIN_ROOT}/dist/failure-lookup-cli.js" \
+  # --no-warnings matches the daemon spawn in session-start.sh. Without it
+  # node:sqlite's ExperimentalWarning is appended to the log on every single
+  # tool call, which is how this log reached 11 MB.
+  RESPONSE=$(node --no-warnings "${CLAUDE_PLUGIN_ROOT}/dist/failure-lookup-cli.js" \
     "$SESSION_ID" "$TOOL_NAME" "$TOOL_INPUT" 2>>"$LOG_FILE") || RESPONSE=""
 fi
 

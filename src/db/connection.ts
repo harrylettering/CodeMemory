@@ -6,21 +6,179 @@
 
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import { open } from "sqlite";
-import sqlite3 from "sqlite3";
+import type { DatabaseSync, StatementSync } from "node:sqlite";
 
-export async function createCodeMemoryDatabaseConnection(dbPath: string): Promise<any> {
+/**
+ * We deliberately depend on the built-in `node:sqlite` rather than the
+ * `sqlite3` npm package. Plugin hosts install plugins with `--ignore-scripts`,
+ * which silently skips `sqlite3`'s native `install` step
+ * (`prebuild-install -r napi || node-gyp rebuild`). The result is a package
+ * tree with sources but no `node_sqlite3.node`, so every daemon start dies on
+ * "Could not locate the bindings file". A built-in has no install step to skip.
+ *
+ * The cost is a Node floor: `node:sqlite` landed in 22.5.0.
+ */
+const MIN_NODE_VERSION_FOR_SQLITE = "22.5.0";
+
+/** Prepared statements are cached per SQL text; the hot lookup path re-runs a
+ * small, fixed set of queries and re-preparing each time is pure overhead. */
+const STATEMENT_CACHE_LIMIT = 256;
+
+/** Bindable SQLite primitive, after normalization. */
+type SqliteBindable = null | number | bigint | string | Uint8Array;
+
+export interface CodeMemoryRunResult {
+  /** Named `lastID` for parity with the previous `sqlite` wrapper. */
+  lastID: number;
+  changes: number;
+}
+
+/**
+ * The async surface the stores are written against. `node:sqlite` is
+ * synchronous, so this adapter exists purely to keep the ~80 existing
+ * `await db.run(...)` call sites unchanged.
+ */
+export interface CodeMemoryDatabase {
+  exec(sql: string): Promise<void>;
+  run(sql: string, ...params: unknown[]): Promise<CodeMemoryRunResult>;
+  get<T = any>(sql: string, ...params: unknown[]): Promise<T | undefined>;
+  all<T = any>(sql: string, ...params: unknown[]): Promise<T[]>;
+  close(): Promise<void>;
+}
+
+export async function createCodeMemoryDatabaseConnection(
+  dbPath: string
+): Promise<CodeMemoryDatabase> {
   const dbDir = dirname(dbPath);
   await mkdir(dbDir, { recursive: true });
 
-  const db = await open({
-    filename: dbPath,
-    driver: sqlite3.Database,
+  const { DatabaseSync: Database } = await loadNodeSqlite();
+
+  const handle = new Database(dbPath, {
+    // The daemon and the one-shot fallback CLI can touch the same file
+    // concurrently. Without a busy timeout `node:sqlite` fails immediately on
+    // SQLITE_BUSY instead of waiting for the other writer to finish.
+    timeout: 5000,
+    // SQLite (and therefore the previous `sqlite3` driver) leaves foreign key
+    // enforcement OFF by default; `node:sqlite` turns it ON. Every table here
+    // was written against the unenforced default — nodes are routinely
+    // inserted before the conversation row they reference — so enabling it
+    // would turn the driver swap into a schema change.
+    enableForeignKeyConstraints: false,
   });
 
+  const db = createDatabaseAdapter(handle);
   await runCodeMemoryMigrations(db);
 
   return db;
+}
+
+/**
+ * Loads the built-in lazily so an unsupported Node version produces an
+ * actionable message instead of a bare ERR_UNKNOWN_BUILTIN_MODULE stack.
+ */
+async function loadNodeSqlite(): Promise<typeof import("node:sqlite")> {
+  try {
+    return await import("node:sqlite");
+  } catch (error) {
+    throw new Error(
+      `[codememory] CodeMemory requires Node >= ${MIN_NODE_VERSION_FOR_SQLITE} ` +
+        `for the built-in node:sqlite module (found ${process.version}). ` +
+        `Upgrade Node and restart the session.`,
+      { cause: error }
+    );
+  }
+}
+
+export function createDatabaseAdapter(handle: DatabaseSync): CodeMemoryDatabase {
+  const statements = new Map<string, StatementSync>();
+
+  function prepare(sql: string): StatementSync {
+    const cached = statements.get(sql);
+    if (cached) return cached;
+
+    const statement = handle.prepare(sql);
+    if (statements.size >= STATEMENT_CACHE_LIMIT) {
+      // FIFO eviction: insertion order is good enough for a fixed query set.
+      const oldest = statements.keys().next();
+      if (!oldest.done) statements.delete(oldest.value);
+    }
+    statements.set(sql, statement);
+    return statement;
+  }
+
+  return {
+    async exec(sql: string): Promise<void> {
+      handle.exec(sql);
+    },
+
+    async run(sql: string, ...params: unknown[]): Promise<CodeMemoryRunResult> {
+      const result = prepare(sql).run(...bindParams(params));
+      return {
+        lastID: Number(result.lastInsertRowid),
+        changes: Number(result.changes),
+      };
+    },
+
+    async get<T = any>(sql: string, ...params: unknown[]): Promise<T | undefined> {
+      const row = prepare(sql).get(...bindParams(params));
+      return row === undefined ? undefined : (toPlainRow(row) as T);
+    },
+
+    async all<T = any>(sql: string, ...params: unknown[]): Promise<T[]> {
+      return prepare(sql)
+        .all(...bindParams(params))
+        .map((row) => toPlainRow(row) as T);
+    },
+
+    async close(): Promise<void> {
+      statements.clear();
+      handle.close();
+    },
+  };
+}
+
+/**
+ * Call sites use both `run(sql, a, b)` and `run(sql, [a, b])`; the previous
+ * `sqlite` wrapper accepted either, so we keep accepting both.
+ */
+function bindParams(params: unknown[]): SqliteBindable[] {
+  const flat =
+    params.length === 1 && Array.isArray(params[0])
+      ? (params[0] as unknown[])
+      : params;
+  return flat.map(normalizeParam);
+}
+
+/**
+ * `node:sqlite` throws on values the old `sqlite3` driver coerced silently.
+ * Reproducing that coercion here keeps the migration behavior-preserving —
+ * without it, any code path that binds an optional field would start throwing
+ * "Provided value cannot be bound to SQLite parameter N" at runtime.
+ */
+function normalizeParam(value: unknown): SqliteBindable {
+  if (value === undefined || value === null) return null;
+  if (typeof value === "boolean") return value ? 1 : 0;
+  if (value instanceof Date) return value.toISOString();
+  if (typeof value === "number") return Number.isFinite(value) ? value : null;
+  if (
+    typeof value === "string" ||
+    typeof value === "bigint" ||
+    value instanceof Uint8Array
+  ) {
+    return value;
+  }
+  throw new TypeError(
+    `[codememory] Cannot bind ${typeof value} to a SQLite parameter: ${String(value)}`
+  );
+}
+
+/**
+ * Rows come back with a null prototype. Callers spread and JSON-serialize
+ * them, so hand back ordinary objects to match the previous driver.
+ */
+function toPlainRow(row: unknown): Record<string, unknown> {
+  return Object.assign({}, row as Record<string, unknown>);
 }
 
 export async function runCodeMemoryMigrations(db: any): Promise<void> {
