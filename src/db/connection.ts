@@ -584,6 +584,18 @@ async function ensureMemoryNodeKindSupport(db: any): Promise<void> {
   const sql = String(table?.sql || "");
   if (sql.includes("'task'") && sql.includes("'constraint'")) return;
 
+  // The table rebuild below drops and renames `memory_nodes`, so foreign key
+  // enforcement has to come off for the duration. Capture the current setting
+  // rather than assuming it: this migration only runs for databases created
+  // before kind='task'/'constraint' existed, and unconditionally restoring it
+  // to ON left those sessions enforcing foreign keys while freshly created
+  // databases did not — the same connection behaving two different ways
+  // depending on how old the file on disk was.
+  const foreignKeysPragma = (await db.get("PRAGMA foreign_keys")) as
+    | { foreign_keys: number }
+    | undefined;
+  const foreignKeysWereEnabled = (foreignKeysPragma?.foreign_keys ?? 0) === 1;
+
   await db.exec("PRAGMA foreign_keys = OFF");
   try {
     await db.exec("BEGIN TRANSACTION");
@@ -653,7 +665,9 @@ async function ensureMemoryNodeKindSupport(db: any): Promise<void> {
     await db.exec("ROLLBACK");
     throw error;
   } finally {
-    await db.exec("PRAGMA foreign_keys = ON");
+    await db.exec(
+      `PRAGMA foreign_keys = ${foreignKeysWereEnabled ? "ON" : "OFF"}`
+    );
   }
 }
 
