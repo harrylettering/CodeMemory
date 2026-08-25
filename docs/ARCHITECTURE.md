@@ -99,8 +99,9 @@ SessionEnd     -> hooks/scripts/session-end.sh
 Important implications:
 
 - **Per-session, not per-process**: sessions do not contaminate each other.
-- **Socket first with CLI fallback**: even if the daemon dies, `PreToolUse` still has a cold-path lookup.
+- **Socket first with CLI fallback**: even if the daemon dies, `PreToolUse` still has a cold-path lookup. Note that this only holds while the two paths can fail independently — when both shared a broken native binding, the fallback re-crashed on the same error and was not a fallback at all.
 - **Crash residue is expected**: stale `.pid` and `.sock` files may need cleanup; `session-start.sh` tries to probe and clean them.
+- **Spawning is not readiness**: `session-start.sh` polls for the lookup socket before reporting success, because a startup crash exits in milliseconds and a hook that announces "CodeMemory initialized" over a dead process hides a total outage indefinitely. The poll abandons the wait as soon as the process disappears (~200 ms), ceiling 3 s via `CODEMEMORY_DAEMON_HEALTH_TIMEOUT`. When the daemon is not serving, the hook says so and points at `daemon.log` — but still returns `continue: true`, since a broken memory system must never block the session.
 
 ---
 
@@ -144,6 +145,19 @@ Design implication: changing scorer rules changes the semantics of the whole sys
 ---
 
 ## 6. Store layer
+
+### 6.0 Storage engine: no native dependencies, ever
+
+All stores share one connection from `src/db/connection.ts`, which uses the **built-in `node:sqlite`**. This is an invariant, not a preference. **Node >= 22.5 is a hard requirement, and a native SQLite binding must never be reintroduced.**
+
+Plugin hosts install with `npm install --ignore-scripts`. That resolves the full dependency tree but never runs a package's `install` lifecycle script, which is exactly where a native addon gets compiled. With the `sqlite3` npm package the result was a tree containing `prebuild-install`, `node-gyp` and `node-addon-api` but no `node_sqlite3.node`, so every daemon start died on "Could not locate the bindings file" — a 100% failure rate on every installed copy, on every platform, deterministically. A built-in has no install step to skip, and SQLite ships compiled into the `node` binary itself.
+
+The connection sets two options explicitly, both to preserve behavior the schema was written against:
+
+- `enableForeignKeyConstraints: false` — `node:sqlite` defaults this to `true`, while SQLite itself defaults it off. Memory nodes are routinely written before the conversation row they reference, so enforcement would reject legitimate writes. Turning it on is a schema decision, not a configuration tweak.
+- `timeout: 5000` — the daemon and the cold-path CLI can write the same file concurrently, and `node:sqlite` fails immediately on `SQLITE_BUSY` without it.
+
+Because `node:sqlite` is synchronous, `connection.ts` wraps `DatabaseSync` in a thin async adapter exposing `exec/run/get/all/close`, caching prepared statements. Two conversions there are load-bearing: `undefined` and `boolean` parameters are normalized (`node:sqlite` throws on values the old driver silently coerced), and rows are copied off their null prototype.
 
 ### 6.1 ConversationStore (`src/store/conversation-store.ts`)
 
@@ -326,12 +340,14 @@ Boundaries:
 - **Not guaranteed truth**: retrieval results are guidance, not ground truth.
 - **Not shared across users**: the database is local per-user SQLite.
 - **Offline and CI require `CODEMEMORY_COMPACTION_DISABLE_LLM=true`** if `claude --print` is unavailable.
+- **Requires Node >= 22.5**: see 6.0. Below that, `node:sqlite` does not exist and the daemon reports the version requirement instead of starting.
 
 Common failure modes and how the system responds:
 
 | Scenario | System behavior |
 |---|---|
-| Daemon crash | hooks fall back to the cold CLI path; session-start restarts next time |
+| Daemon crash at startup | `session-start.sh` detects the dead process and reports that CodeMemory is not running, naming `daemon.log`; the session continues unaffected |
+| Daemon crash mid-session | hooks fall back to the cold CLI path; session-start restarts next time |
 | Repeated identical error | debounce plus confidence decay prevents repeated injection |
 | LLM compaction failure | truncation fallback is used; writes are not blocked |
 | Stale `.sock` or `.pid` | cleaned by session-start probing |

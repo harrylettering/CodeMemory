@@ -99,8 +99,9 @@ SessionEnd       ─► hooks/scripts/session-end.sh
 要点：
 
 - **per-session** 而非 per-process —— 不同 session 之间互不影响；崩溃不会污染他人。
-- **socket 优先 + CLI 冷启动 fallback** —— 即使 daemon 进程死了，hook 仍能用 `dist/failure-lookup-cli.js` 完成本次 PreToolUse 查询，只是慢一点（150–300ms）。
+- **socket 优先 + CLI 冷启动 fallback** —— 即使 daemon 进程死了，hook 仍能用 `dist/failure-lookup-cli.js` 完成本次 PreToolUse 查询，只是慢一点（150–300ms）。注意这个保证只在两条路径能独立失败时成立：当两者共用同一个坏掉的原生绑定时，fallback 会在同一个错误上再崩一次，等于没有 fallback。
 - **崩溃残留** —— 崩溃后的 stale `.pid` / `.sock` 可能需要手工清理；`session-start.sh` 的逻辑会尝试探活并清理。
+- **spawn 不等于就绪** —— `session-start.sh` 必须轮询 lookup socket 出现后才报成功。启动期崩溃在毫秒级就退出，而一个对着死进程宣告「CodeMemory initialized」的 hook 会把一次彻底的服务中断无限期地藏起来。轮询在进程消失的瞬间放弃等待（约 200ms），上限 3s，可用 `CODEMEMORY_DAEMON_HEALTH_TIMEOUT` 调整。daemon 未就绪时 hook 会明说并指向 `daemon.log`，但仍返回 `continue: true` —— 记忆系统坏掉绝不能阻塞用户的 session。
 
 ---
 
@@ -142,6 +143,19 @@ CodeMemory 同时跑两条摄入路径，喂同一个 store：
 ---
 
 ## 6. Store 层
+
+### 6.0 存储引擎：永远不引入原生依赖
+
+所有 store 共用 `src/db/connection.ts` 的同一个连接，底层是 **Node 内置的 `node:sqlite`**。这是一条不变量，不是偏好。**Node >= 22.5 是硬性要求，且绝不允许再引入原生 SQLite 绑定。**
+
+插件宿主用 `npm install --ignore-scripts` 安装。它会完整解析依赖树，但不会执行任何包的 `install` 生命周期脚本 —— 而原生扩展恰恰就是在那一步编译的。用 `sqlite3` npm 包时的结果是：`prebuild-install`、`node-gyp`、`node-addon-api` 全都装上了，唯独 `node_sqlite3.node` 不存在，于是每次 daemon 启动都死在 "Could not locate the bindings file"。这是**确定性**故障，在所有平台、所有机器上对每一份已安装副本都是 100% 失败率。内置模块没有可被跳过的安装步骤，SQLite 本身就编译在 `node` 二进制里。
+
+连接层显式设置了两个选项，都是为了保持 schema 当初依赖的行为：
+
+- `enableForeignKeyConstraints: false` —— `node:sqlite` 默认 `true`，而 SQLite 自身默认关闭。memory node 经常先于它引用的 conversation 行写入，开启强制会拒绝合法写入。要打开它属于 schema 决策，不是配置调整。
+- `timeout: 5000` —— daemon 和冷路径 CLI 可能并发写同一个文件，不设置的话 `node:sqlite` 会在 `SQLITE_BUSY` 上立即失败。
+
+由于 `node:sqlite` 是同步 API，`connection.ts` 用一层薄适配器包住 `DatabaseSync`，对外暴露 `exec/run/get/all/close` 并缓存预编译语句。其中两处转换是关键：`undefined` 与 `boolean` 参数会被归一化（老驱动静默容忍的值，`node:sqlite` 会直接抛错），以及把返回行从 null 原型复制成普通对象。
 
 ### 6.1 ConversationStore (`src/store/conversation-store.ts`)
 
@@ -350,12 +364,14 @@ CodeMemory 的边界：
 - **不强制可信。** 检索结果是建议而非事实；模型仍要自己核对。
 - **不跨用户共享。** 数据库是 per-user 的本地 SQLite。
 - **离线 / 测试需 `CODEMEMORY_COMPACTION_DISABLE_LLM=true`** —— 否则 compactor 会 spawn `claude --print` 失败。
+- **要求 Node >= 22.5** —— 见 6.0。低于此版本 `node:sqlite` 不存在，daemon 会报出版本要求而不是启动。
 
 常见失败模式与系统的应对：
 
 | 场景 | 系统表现 |
 |---|---|
-| Daemon 崩溃 | hook 走 cold path CLI fallback；session-start 下一次自检并重启 |
+| Daemon 启动期崩溃 | `session-start.sh` 探测到进程已死，明确告知 CodeMemory 未运行并指向 `daemon.log`；session 不受影响继续 |
+| Daemon 运行中崩溃 | hook 走 cold path CLI fallback；session-start 下一次自检并重启 |
 | 同一错误重复 | debounce 60s + confidence 衰减，避免反复注入 |
 | LLM compaction 失败 | 截断 fallback；不阻塞写入 |
 | Stale `.sock` / `.pid` | session-start 探活清理 |
