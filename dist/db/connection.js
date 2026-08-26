@@ -5,17 +5,134 @@
  */
 import { mkdir } from "node:fs/promises";
 import { dirname } from "node:path";
-import { open } from "sqlite";
-import sqlite3 from "sqlite3";
+/**
+ * We deliberately depend on the built-in `node:sqlite` rather than the
+ * `sqlite3` npm package. Plugin hosts install plugins with `--ignore-scripts`,
+ * which silently skips `sqlite3`'s native `install` step
+ * (`prebuild-install -r napi || node-gyp rebuild`). The result is a package
+ * tree with sources but no `node_sqlite3.node`, so every daemon start dies on
+ * "Could not locate the bindings file". A built-in has no install step to skip.
+ *
+ * The cost is a Node floor: `node:sqlite` landed in 22.5.0.
+ */
+const MIN_NODE_VERSION_FOR_SQLITE = "22.5.0";
+/** Prepared statements are cached per SQL text; the hot lookup path re-runs a
+ * small, fixed set of queries and re-preparing each time is pure overhead. */
+const STATEMENT_CACHE_LIMIT = 256;
 export async function createCodeMemoryDatabaseConnection(dbPath) {
     const dbDir = dirname(dbPath);
     await mkdir(dbDir, { recursive: true });
-    const db = await open({
-        filename: dbPath,
-        driver: sqlite3.Database,
+    const { DatabaseSync: Database } = await loadNodeSqlite();
+    const handle = new Database(dbPath, {
+        // The daemon and the one-shot fallback CLI can touch the same file
+        // concurrently. Without a busy timeout `node:sqlite` fails immediately on
+        // SQLITE_BUSY instead of waiting for the other writer to finish.
+        timeout: 5000,
+        // SQLite (and therefore the previous `sqlite3` driver) leaves foreign key
+        // enforcement OFF by default; `node:sqlite` turns it ON. Every table here
+        // was written against the unenforced default — nodes are routinely
+        // inserted before the conversation row they reference — so enabling it
+        // would turn the driver swap into a schema change.
+        enableForeignKeyConstraints: false,
     });
+    const db = createDatabaseAdapter(handle);
     await runCodeMemoryMigrations(db);
     return db;
+}
+/**
+ * Loads the built-in lazily so an unsupported Node version produces an
+ * actionable message instead of a bare ERR_UNKNOWN_BUILTIN_MODULE stack.
+ */
+async function loadNodeSqlite() {
+    try {
+        return await import("node:sqlite");
+    }
+    catch (error) {
+        throw new Error(`[codememory] CodeMemory requires Node >= ${MIN_NODE_VERSION_FOR_SQLITE} ` +
+            `for the built-in node:sqlite module (found ${process.version}). ` +
+            `Upgrade Node and restart the session.`, { cause: error });
+    }
+}
+export function createDatabaseAdapter(handle) {
+    const statements = new Map();
+    function prepare(sql) {
+        const cached = statements.get(sql);
+        if (cached)
+            return cached;
+        const statement = handle.prepare(sql);
+        if (statements.size >= STATEMENT_CACHE_LIMIT) {
+            // FIFO eviction: insertion order is good enough for a fixed query set.
+            const oldest = statements.keys().next();
+            if (!oldest.done)
+                statements.delete(oldest.value);
+        }
+        statements.set(sql, statement);
+        return statement;
+    }
+    return {
+        async exec(sql) {
+            handle.exec(sql);
+        },
+        async run(sql, ...params) {
+            const result = prepare(sql).run(...bindParams(params));
+            return {
+                lastID: Number(result.lastInsertRowid),
+                changes: Number(result.changes),
+            };
+        },
+        async get(sql, ...params) {
+            const row = prepare(sql).get(...bindParams(params));
+            return row === undefined ? undefined : toPlainRow(row);
+        },
+        async all(sql, ...params) {
+            return prepare(sql)
+                .all(...bindParams(params))
+                .map((row) => toPlainRow(row));
+        },
+        async close() {
+            statements.clear();
+            handle.close();
+        },
+    };
+}
+/**
+ * Call sites use both `run(sql, a, b)` and `run(sql, [a, b])`; the previous
+ * `sqlite` wrapper accepted either, so we keep accepting both.
+ */
+function bindParams(params) {
+    const flat = params.length === 1 && Array.isArray(params[0])
+        ? params[0]
+        : params;
+    return flat.map(normalizeParam);
+}
+/**
+ * `node:sqlite` throws on values the old `sqlite3` driver coerced silently.
+ * Reproducing that coercion here keeps the migration behavior-preserving —
+ * without it, any code path that binds an optional field would start throwing
+ * "Provided value cannot be bound to SQLite parameter N" at runtime.
+ */
+function normalizeParam(value) {
+    if (value === undefined || value === null)
+        return null;
+    if (typeof value === "boolean")
+        return value ? 1 : 0;
+    if (value instanceof Date)
+        return value.toISOString();
+    if (typeof value === "number")
+        return Number.isFinite(value) ? value : null;
+    if (typeof value === "string" ||
+        typeof value === "bigint" ||
+        value instanceof Uint8Array) {
+        return value;
+    }
+    throw new TypeError(`[codememory] Cannot bind ${typeof value} to a SQLite parameter: ${String(value)}`);
+}
+/**
+ * Rows come back with a null prototype. Callers spread and JSON-serialize
+ * them, so hand back ordinary objects to match the previous driver.
+ */
+function toPlainRow(row) {
+    return Object.assign({}, row);
 }
 export async function runCodeMemoryMigrations(db) {
     // Migration 1: Create conversations table
@@ -364,6 +481,15 @@ async function ensureMemoryNodeKindSupport(db) {
     const sql = String(table?.sql || "");
     if (sql.includes("'task'") && sql.includes("'constraint'"))
         return;
+    // The table rebuild below drops and renames `memory_nodes`, so foreign key
+    // enforcement has to come off for the duration. Capture the current setting
+    // rather than assuming it: this migration only runs for databases created
+    // before kind='task'/'constraint' existed, and unconditionally restoring it
+    // to ON left those sessions enforcing foreign keys while freshly created
+    // databases did not — the same connection behaving two different ways
+    // depending on how old the file on disk was.
+    const foreignKeysPragma = (await db.get("PRAGMA foreign_keys"));
+    const foreignKeysWereEnabled = (foreignKeysPragma?.foreign_keys ?? 0) === 1;
     await db.exec("PRAGMA foreign_keys = OFF");
     try {
         await db.exec("BEGIN TRANSACTION");
@@ -431,7 +557,7 @@ async function ensureMemoryNodeKindSupport(db) {
         throw error;
     }
     finally {
-        await db.exec("PRAGMA foreign_keys = ON");
+        await db.exec(`PRAGMA foreign_keys = ${foreignKeysWereEnabled ? "ON" : "OFF"}`);
     }
 }
 export async function getCodeMemoryDbFeatures(db) {
