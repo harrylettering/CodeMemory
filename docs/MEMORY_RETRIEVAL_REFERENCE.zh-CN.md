@@ -18,6 +18,108 @@ User prompt
   -> markdown injection + metrics
 ```
 
+### 1.1 时序图
+
+```mermaid
+%%{init: {
+  "theme": "base",
+  "themeVariables": {
+    "primaryColor": "#eef2ff",
+    "primaryTextColor": "#1f2937",
+    "primaryBorderColor": "#4f46e5",
+    "actorBkg": "#1e3a8a",
+    "actorTextColor": "#ffffff",
+    "actorLineColor": "#1e3a8a",
+    "signalColor": "#111827",
+    "signalTextColor": "#111827",
+    "labelBoxBkgColor": "#fde68a",
+    "labelBoxBorderColor": "#92400e",
+    "labelTextColor": "#1f2937",
+    "noteBkgColor": "#fef3c7",
+    "noteBorderColor": "#92400e",
+    "noteTextColor": "#1f2937",
+    "sequenceNumberColor": "#ffffff"
+  }
+}}%%
+sequenceDiagram
+    autonumber
+    participant H as Hook
+    participant D as Daemon
+    participant E as Engine
+    participant P as Pivot
+    participant FP as FastPlan
+    participant LP as LLMPlan
+    participant M as Memory
+    participant S as Stitch
+    participant F as Failure
+    participant KW as Keyword
+    participant G as DAG
+
+    H->>D: prompt + sid
+    D->>E: retrieveForPrompt
+
+    rect rgb(238, 242, 255)
+        Note over E,FP: 阶段 1 · 解析与规划（本地）
+        E->>P: 抽取 pivots
+        P-->>E: files / bins / ids
+        E->>FP: 构建 fast plan
+        FP-->>E: intent / kinds / tags
+    end
+
+    rect rgb(254, 243, 199)
+        Note over E,LP: 阶段 2 · 可选 LLM（gated）
+        alt 召回弱 + 历史性 + planner 已启用
+            E->>LP: claude --print（haiku，带超时）
+            LP-->>E: 增强 plan（或超时丢弃）
+        else 默认路径
+            Note over E,LP: 跳过 —— 绝大多数 prompt 走这里
+        end
+    end
+
+    rect rgb(220, 252, 231)
+        Note over E,F: 阶段 3 · 召回
+        E->>M: memory_tags + 评分
+        M-->>E: memory hits
+        E->>S: ≤ 2 hops 关系拼接
+        S-->>E: relations / chains
+        E->>F: findFailuresByAnchors
+        F-->>E: failures（conf ≥ 0.6）
+    end
+
+    rect rgb(254, 226, 226)
+        Note over E,G: 阶段 4 · 兜底（条件触发）
+        opt 主链路全部偏弱
+            E->>KW: S-tier 会话
+            KW-->>E: keyword hits
+        end
+        opt 上下文仍不足
+            E->>G: DAG backfill
+            G-->>E: summaries
+        end
+    end
+
+    E-->>D: plan + nodes + markdown
+    D-->>H: additionalContext（空即静默跳过）
+```
+
+名称对照表：
+
+| 别名     | 组件                                          |
+| -------- | --------------------------------------------- |
+| Hook     | `hooks/scripts/user-prompt-submit.sh`         |
+| Daemon   | daemon 上的 `/retrieval/onPrompt` 路由        |
+| Engine   | `RetrievalEngine.retrieveForPrompt`           |
+| Pivot    | `PivotExtractor`                              |
+| FastPlan | `FastPlanner`（确定性，不调模型）             |
+| LLMPlan  | LLM Query Planner（gated，haiku）             |
+| Memory   | `MemoryNodeStore` + scorer                    |
+| Stitch   | 关系拼接器（≤ 2 hops）                        |
+| Failure  | `findFailuresByAnchors`                       |
+| Keyword  | Path B：S-tier 会话 keyword 兜底              |
+| DAG      | Summary DAG backfill                          |
+
+整条链路里**唯一**可能调模型的就是阶段 2 —— 受 `CODEMEMORY_QUERY_PLANNER_ENABLED` 加「召回弱 + 历史性 prompt」双重 gate 控制。其余步骤都是本地 SQLite + 确定性评分。
+
 ## 2. Prompt parse 与 query planning
 
 ### 2.1 Fast plan

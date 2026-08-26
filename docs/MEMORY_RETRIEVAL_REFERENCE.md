@@ -18,6 +18,108 @@ User prompt
   -> markdown injection + metrics
 ```
 
+### 1.1 Sequence diagram
+
+```mermaid
+%%{init: {
+  "theme": "base",
+  "themeVariables": {
+    "primaryColor": "#eef2ff",
+    "primaryTextColor": "#1f2937",
+    "primaryBorderColor": "#4f46e5",
+    "actorBkg": "#1e3a8a",
+    "actorTextColor": "#ffffff",
+    "actorLineColor": "#1e3a8a",
+    "signalColor": "#111827",
+    "signalTextColor": "#111827",
+    "labelBoxBkgColor": "#fde68a",
+    "labelBoxBorderColor": "#92400e",
+    "labelTextColor": "#1f2937",
+    "noteBkgColor": "#fef3c7",
+    "noteBorderColor": "#92400e",
+    "noteTextColor": "#1f2937",
+    "sequenceNumberColor": "#ffffff"
+  }
+}}%%
+sequenceDiagram
+    autonumber
+    participant H as Hook
+    participant D as Daemon
+    participant E as Engine
+    participant P as Pivot
+    participant FP as FastPlan
+    participant LP as LLMPlan
+    participant M as Memory
+    participant S as Stitch
+    participant F as Failure
+    participant KW as Keyword
+    participant G as DAG
+
+    H->>D: prompt + sid
+    D->>E: retrieveForPrompt
+
+    rect rgb(238, 242, 255)
+        Note over E,FP: Phase 1 · parse & plan (local)
+        E->>P: extract pivots
+        P-->>E: files, bins, ids
+        E->>FP: build fast plan
+        FP-->>E: intent, kinds, tags
+    end
+
+    rect rgb(254, 243, 199)
+        Note over E,LP: Phase 2 · optional LLM (gated)
+        alt fast weak + historical + planner enabled
+            E->>LP: claude --print (haiku, timeout)
+            LP-->>E: enriched plan (or dropped)
+        else default
+            Note over E,LP: skipped — most prompts land here
+        end
+    end
+
+    rect rgb(220, 252, 231)
+        Note over E,F: Phase 3 · recall
+        E->>M: memory_tags + score
+        M-->>E: memory hits
+        E->>S: stitch ≤ 2 hops
+        S-->>E: relations / chains
+        E->>F: findFailuresByAnchors
+        F-->>E: failures (conf ≥ 0.6)
+    end
+
+    rect rgb(254, 226, 226)
+        Note over E,G: Phase 4 · fallback (conditional)
+        opt all weak
+            E->>KW: S-tier conversation
+            KW-->>E: keyword hits
+        end
+        opt context still thin
+            E->>G: DAG backfill
+            G-->>E: summaries
+        end
+    end
+
+    E-->>D: plan + nodes + markdown
+    D-->>H: additionalContext (empty → silent skip)
+```
+
+Participant aliases:
+
+| Alias    | Component                                |
+| -------- | ---------------------------------------- |
+| Hook     | `hooks/scripts/user-prompt-submit.sh`    |
+| Daemon   | `/retrieval/onPrompt` route on daemon    |
+| Engine   | `RetrievalEngine.retrieveForPrompt`      |
+| Pivot    | `PivotExtractor`                         |
+| FastPlan | `FastPlanner` (deterministic, no model)  |
+| LLMPlan  | LLM Query Planner (gated, haiku)         |
+| Memory   | `MemoryNodeStore` + scorer               |
+| Stitch   | Relation stitcher (≤ 2 hops)             |
+| Failure  | `findFailuresByAnchors`                  |
+| Keyword  | Path B keyword fallback over S-tier      |
+| DAG      | Summary DAG backfill                     |
+
+The only step that may invoke a model is Phase 2 — gated by `CODEMEMORY_QUERY_PLANNER_ENABLED` plus the weakness/historical-intent check. Every other step is local SQLite + deterministic scoring.
+
 ## 2. Prompt parsing and query planning
 
 ### 2.1 Fast plan
