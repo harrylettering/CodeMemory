@@ -7,6 +7,13 @@
 
 set -euo pipefail
 
+# Stand down inside a `claude --print` child spawned by CodeMemory itself;
+# see the note in session-start.sh.
+if [ -n "${CODEMEMORY_CHILD:-}" ]; then
+  printf '%s\n' '{"continue":true,"suppressOutput":true}'
+  exit 0
+fi
+
 SESSION_ID="${1:-unknown}"
 
 LOG_DIR="${HOME}/.claude/codememory-logs"
