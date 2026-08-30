@@ -1,6 +1,6 @@
 {
   "name": "codememory-for-claude",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "CodeMemory for Claude Code CLI",
   "type": "module",
   "main": "dist/plugin/index.js",
@@ -23,7 +23,8 @@
     "build": "tsc",
     "build:watch": "tsc --watch",
     "plugin:validate": "claude plugin validate .",
-    "plugin:release-check": "npm run build && claude plugin validate .",
+    "plugin:check-dist": "node scripts/check-dist-committed.mjs",
+    "plugin:release-check": "npm run build && npm run plugin:check-dist && claude plugin validate .",
     "lint": "eslint src/**/*.ts",
     "benchmark": "npm run build && node benchmark/lookup-latency.ts",
     "benchmark:ci": "npm run build && node benchmark/lookup-latency.ts --ci"
