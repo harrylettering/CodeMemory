@@ -12,6 +12,11 @@
  * are never auto-handled — that is a deliberate design choice.
  */
 import { spawn } from "node:child_process";
+import {
+  buildClaudeCliArgs,
+  claudeCliSpawnEnv,
+  describeClaudeCliFailure,
+} from "../llm/claude-cli.js";
 
 export interface DecisionJudgeCandidate {
   nodeId: string;
@@ -135,9 +140,11 @@ function runClaudeJudge(
   config: DecisionJudgeConfig
 ): Promise<string> {
   return new Promise((resolve, reject) => {
-    const args = ["--bare", "--print", "--output-format", "text"];
-    if (config.model) args.push("--model", config.model);
-    const child = spawn("claude", args, { stdio: ["pipe", "pipe", "pipe"] });
+    const args = buildClaudeCliArgs(config.model);
+    const child = spawn("claude", args, {
+      stdio: ["pipe", "pipe", "pipe"],
+      env: claudeCliSpawnEnv(),
+    });
     const stdoutChunks: Buffer[] = [];
     const stderrChunks: Buffer[] = [];
     let settled = false;
@@ -160,8 +167,11 @@ function runClaudeJudge(
       settled = true;
       clearTimeout(timer);
       if (code !== 0) {
-        const stderr = Buffer.concat(stderrChunks).toString("utf-8").slice(0, 500);
-        reject(new Error(`decision judge exited ${code}: ${stderr}`));
+        const reason = describeClaudeCliFailure(
+          Buffer.concat(stdoutChunks).toString("utf-8"),
+          Buffer.concat(stderrChunks).toString("utf-8")
+        );
+        reject(new Error(`decision judge exited ${code}: ${reason}`));
         return;
       }
       resolve(Buffer.concat(stdoutChunks).toString("utf-8").trim());

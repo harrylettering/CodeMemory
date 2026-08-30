@@ -22,6 +22,13 @@ emit_noop() {
 }
 trap 'emit_noop' ERR
 
+# Stand down inside a `claude --print` child spawned by CodeMemory itself;
+# see the note in session-start.sh.
+if [ -n "${CODEMEMORY_CHILD:-}" ]; then
+  emit_noop
+  exit 0
+fi
+
 INPUT=$(cat)
 SESSION_ID=$(printf '%s' "$INPUT" | jq -r '.session_id // "unknown"')
 TOOL_NAME=$(printf '%s' "$INPUT" | jq -r '.tool_name // ""')

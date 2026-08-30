@@ -4,6 +4,17 @@
 
 set -euo pipefail
 
+# CodeMemory spawns `claude --print` for summaries, query planning, the
+# supersede judge and expansion delegation. Those children run our hooks too,
+# and an unguarded SessionStart would start a second daemon against the same
+# database. This used to be prevented with `--bare`, which also stopped the CLI
+# reading the keychain and broke every LLM call for OAuth users; the parent now
+# sets CODEMEMORY_CHILD instead and every hook stands down when it sees it.
+if [ -n "${CODEMEMORY_CHILD:-}" ]; then
+    printf '%s\n' '{"continue":true,"suppressOutput":true}'
+    exit 0
+fi
+
 # Log directory
 LOG_DIR="${HOME}/.claude/codememory-logs"
 mkdir -p "$LOG_DIR"

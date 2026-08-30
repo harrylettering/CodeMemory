@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { buildClaudeCliArgs, claudeCliSpawnEnv, describeClaudeCliFailure, } from "./llm/claude-cli.js";
 import { createFastRetrievalPlan, normalizeTagValue, } from "./retrieval-plan.js";
 export class SmartQueryPlanner {
     config;
@@ -212,11 +213,11 @@ function clampNumber(value, fallback, min, max) {
 }
 function runClaudePlanner(prompt, config) {
     return new Promise((resolve, reject) => {
-        const args = ["--bare", "--print", "--output-format", "text"];
-        if (config.queryPlannerModel) {
-            args.push("--model", config.queryPlannerModel);
-        }
-        const child = spawn("claude", args, { stdio: ["pipe", "pipe", "pipe"] });
+        const args = buildClaudeCliArgs(config.queryPlannerModel);
+        const child = spawn("claude", args, {
+            stdio: ["pipe", "pipe", "pipe"],
+            env: claudeCliSpawnEnv(),
+        });
         const stdoutChunks = [];
         const stderrChunks = [];
         let settled = false;
@@ -242,8 +243,8 @@ function runClaudePlanner(prompt, config) {
             settled = true;
             clearTimeout(timer);
             if (code !== 0) {
-                const stderr = Buffer.concat(stderrChunks).toString("utf-8").slice(0, 500);
-                reject(new Error(`query planner exited with code ${code}: ${stderr}`));
+                const reason = describeClaudeCliFailure(Buffer.concat(stdoutChunks).toString("utf-8"), Buffer.concat(stderrChunks).toString("utf-8"));
+                reject(new Error(`query planner exited with code ${code}: ${reason}`));
                 return;
             }
             resolve(Buffer.concat(stdoutChunks).toString("utf-8").trim());
