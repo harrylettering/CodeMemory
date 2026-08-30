@@ -6,6 +6,7 @@
  * existing Claude Code authentication — no separate API key needed.
  */
 import { spawn } from "node:child_process";
+import { buildClaudeCliArgs, claudeCliSpawnEnv, describeClaudeCliFailure, } from "../llm/claude-cli.js";
 const SUBAGENT_SYSTEM_PROMPT = "You are a memory-expansion subagent for the CodeMemory plugin. " +
     "Answer the user's question using only the provided conversation history excerpts. " +
     "Be concise and factual. If the excerpts don't contain enough information, say so explicitly.";
@@ -46,22 +47,19 @@ export function createExpansionDelegation(deps) {
  */
 function spawnClaudePrint(prompt, systemPrompt, timeoutMs, model) {
     return new Promise((resolve, reject) => {
-        // `--bare` keeps the subagent isolated from the parent session: it
-        // skips our own SessionStart/PreToolUse/etc hooks and plugin sync, so
+        // CODEMEMORY_CHILD (set by claudeCliSpawnEnv) keeps the subagent isolated
+        // from the parent session: our hook scripts stand down when they see it, so
         // the child won't start another CodeMemory daemon against the same sqlite
-        // file. Without this, expansion delegation was silently reentrant.
+        // file. Without that guard, expansion delegation was silently reentrant.
         const args = [
-            "--bare",
-            "--print",
-            "--output-format",
-            "text",
+            ...buildClaudeCliArgs(model),
             "--append-system-prompt",
             systemPrompt,
         ];
-        if (model) {
-            args.push("--model", model);
-        }
-        const child = spawn("claude", args, { stdio: ["pipe", "pipe", "pipe"] });
+        const child = spawn("claude", args, {
+            stdio: ["pipe", "pipe", "pipe"],
+            env: claudeCliSpawnEnv(),
+        });
         const stdoutChunks = [];
         const stderrChunks = [];
         let settled = false;
@@ -87,8 +85,8 @@ function spawnClaudePrint(prompt, systemPrompt, timeoutMs, model) {
             settled = true;
             clearTimeout(timer);
             if (code !== 0) {
-                const stderr = Buffer.concat(stderrChunks).toString("utf-8").slice(0, 500);
-                reject(new Error(`claude --print exited with code ${code}: ${stderr}`));
+                const reason = describeClaudeCliFailure(Buffer.concat(stdoutChunks).toString("utf-8"), Buffer.concat(stderrChunks).toString("utf-8"));
+                reject(new Error(`claude --print exited with code ${code}: ${reason}`));
                 return;
             }
             resolve(Buffer.concat(stdoutChunks).toString("utf-8").trim());

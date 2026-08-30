@@ -18,6 +18,7 @@
  * in summary_messages. No extra column needed.
  */
 import { spawn } from "node:child_process";
+import { buildClaudeCliArgs, claudeCliSpawnEnv, describeClaudeCliFailure, } from "../llm/claude-cli.js";
 import { createMemoryNodeStore } from "../store/memory-store.js";
 /**
  * Marker prepended to fallback "summaries" so readers see immediately that
@@ -395,14 +396,7 @@ export class AsyncCompactor {
     async callLlmOrTruncate(prompt, fallbackContent, options) {
         if (!this.config.compactionDisableLlm) {
             try {
-                // `--bare` skips hooks / plugin sync / CLAUDE.md discovery — critical
-                // when this spawn runs from inside the daemon (or any Claude-invoked
-                // process), otherwise the child reloads our own SessionStart hook
-                // chain and restarts another daemon.
-                const args = ["--bare", "--print", "--output-format", "text"];
-                if (this.config.compactionModel) {
-                    args.push("--model", this.config.compactionModel);
-                }
+                const args = buildClaudeCliArgs(this.config.compactionModel);
                 const raw = await spawnWithStdin("claude", args, prompt, 30_000);
                 const firstParsed = parseSummaryWithMetadata(raw);
                 const firstCheck = this.validateSummaryQuality(firstParsed.content, fallbackContent, options);
@@ -500,7 +494,10 @@ function normalizeForOverlap(text) {
  */
 function spawnWithStdin(cmd, args, input, timeoutMs) {
     return new Promise((resolve, reject) => {
-        const child = spawn(cmd, args, { stdio: ["pipe", "pipe", "pipe"] });
+        const child = spawn(cmd, args, {
+            stdio: ["pipe", "pipe", "pipe"],
+            env: claudeCliSpawnEnv(),
+        });
         const stdoutChunks = [];
         const stderrChunks = [];
         let settled = false;
@@ -526,8 +523,8 @@ function spawnWithStdin(cmd, args, input, timeoutMs) {
             settled = true;
             clearTimeout(timer);
             if (code !== 0) {
-                const stderr = Buffer.concat(stderrChunks).toString("utf-8").slice(0, 500);
-                reject(new Error(`claude --print exited with code ${code}: ${stderr}`));
+                const reason = describeClaudeCliFailure(Buffer.concat(stdoutChunks).toString("utf-8"), Buffer.concat(stderrChunks).toString("utf-8"));
+                reject(new Error(`claude --print exited with code ${code}: ${reason}`));
                 return;
             }
             resolve(Buffer.concat(stdoutChunks).toString("utf-8").trim());

@@ -4,6 +4,14 @@
 
 set -euo pipefail
 
+# Stand down inside a `claude --print` child spawned by CodeMemory itself;
+# see the note in session-start.sh. Without this the child's SessionEnd would
+# tear down the parent session's daemon.
+if [ -n "${CODEMEMORY_CHILD:-}" ]; then
+  printf '%s\n' '{"continue":true,"suppressOutput":true}'
+  exit 0
+fi
+
 # Get hook input from stdin
 INPUT=$(cat)
 
