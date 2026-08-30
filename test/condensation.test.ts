@@ -23,7 +23,7 @@ import { createCodeMemoryDatabaseConnection } from "../src/db/connection.js";
 import { ConversationStore } from "../src/store/conversation-store.js";
 import { CodeMemoryContextEngine } from "../src/engine.js";
 import { resolveCodeMemoryConfig } from "../src/db/config.js";
-import { TRUNCATION_FALLBACK_MARKER } from "../src/compaction/compactor.js";
+import { AsyncCompactor, TRUNCATION_FALLBACK_MARKER } from "../src/compaction/compactor.js";
 
 let dbDir: string;
 const savedEnv: Record<string, string | undefined> = {};
@@ -39,6 +39,9 @@ const TRACKED_ENV = [
   "CODEMEMORY_LEAF_CHUNK_TOKENS",
   "CODEMEMORY_CONDENSED_MIN_FANOUT",
   "CODEMEMORY_COMPACTION_FRESH_TAIL_COUNT",
+  "CODEMEMORY_LEAF_TARGET_TOKENS",
+  "CODEMEMORY_CONDENSED_TARGET_TOKENS",
+  "CODEMEMORY_COMPACTION_MAX_INPUT_CHARS",
 ];
 
 beforeEach(() => {
@@ -207,6 +210,127 @@ describe("runCondensation (Phase 6)", () => {
         "SELECT COUNT(*) as n FROM summaries WHERE kind = 'condensed'"
       );
       expect(condCount.n).toBe(1);
+    } finally {
+      await db.close();
+    }
+  });
+});
+
+/**
+ * Condensation used to announce its intent before doing the work — "condensing
+ * N leaves into M condensed summary/ies" — and then skip every batch. A DAG
+ * that had been flat for months therefore read as healthy in the logs. These
+ * cover both halves: the log must describe the outcome, and a configuration in
+ * which condensation can never fire must say so out loud.
+ */
+describe("runCondensation diagnostics", () => {
+  function capturingLogger() {
+    const warns: string[] = [];
+    const infos: string[] = [];
+    return {
+      warns,
+      infos,
+      logger: {
+        debug: () => {},
+        info: (...args: any[]) => infos.push(args.join(" ")),
+        warn: (...args: any[]) => warns.push(args.join(" ")),
+        error: () => {},
+      },
+    };
+  }
+
+  it("warns at construction when minFanout x leafTargetTokens exceeds the input window", async () => {
+    process.env.CODEMEMORY_CONDENSED_MIN_FANOUT = "4";
+    process.env.CODEMEMORY_LEAF_TARGET_TOKENS = "3600";
+    process.env.CODEMEMORY_COMPACTION_MAX_INPUT_CHARS = "24000";
+
+    const db = await createCodeMemoryDatabaseConnection(
+      process.env.CODEMEMORY_DATABASE_PATH!
+    );
+    try {
+      const { warns, logger } = capturingLogger();
+      // 4 x 3600 = 14400 tokens needed, against a min(2000x4, 24000/4) = 6000
+      // token window. No batch can ever reach the fanout threshold.
+      new AsyncCompactor(db, resolveCodeMemoryConfig(), logger);
+
+      expect(warns.join("\n")).toContain("condensation can never trigger");
+      expect(warns.join("\n")).toContain("14400");
+      expect(warns.join("\n")).toContain("6000");
+    } finally {
+      await db.close();
+    }
+  });
+
+  it("stays quiet at construction under the default configuration", async () => {
+    const db = await createCodeMemoryDatabaseConnection(
+      process.env.CODEMEMORY_DATABASE_PATH!
+    );
+    try {
+      const { warns, logger } = capturingLogger();
+      // Defaults: 4 x 1200 = 4800 <= 6000. Healthy, so no warning.
+      new AsyncCompactor(db, resolveCodeMemoryConfig(), logger);
+      expect(warns).toEqual([]);
+    } finally {
+      await db.close();
+    }
+  });
+
+  it("reports what condensation actually created, not what it attempted", async () => {
+    await seedConversation("sess-outcome", 24);
+
+    const db = await createCodeMemoryDatabaseConnection(
+      process.env.CODEMEMORY_DATABASE_PATH!
+    );
+    try {
+      const { infos, logger } = capturingLogger();
+      const compactor = new AsyncCompactor(db, resolveCodeMemoryConfig(), logger);
+      const conv = await db.get(
+        "SELECT conversationId FROM conversations WHERE sessionId = ?",
+        "sess-outcome"
+      );
+      await compactor.forceCompact(conv.conversationId);
+
+      const condensed = await db.get(
+        "SELECT COUNT(*) as n FROM summaries WHERE kind = 'condensed'"
+      );
+      expect(condensed.n).toBe(1);
+
+      // The count in the log has to match what landed in the table.
+      const line = infos.find((l) => l.includes("condensed"));
+      expect(line).toBeDefined();
+      expect(line).toContain("into 1 summary/ies");
+    } finally {
+      await db.close();
+    }
+  });
+
+  it("warns instead of failing silently when every batch falls below minFanout", async () => {
+    // A 400-token window against 50-token-per-message leaves still admits
+    // several leaves, so shrink the window until one leaf fills a batch.
+    process.env.CODEMEMORY_CONDENSED_MIN_FANOUT = "4";
+    process.env.CODEMEMORY_COMPACTION_MAX_INPUT_CHARS = "400";
+    await seedConversation("sess-starved", 24);
+
+    const db = await createCodeMemoryDatabaseConnection(
+      process.env.CODEMEMORY_DATABASE_PATH!
+    );
+    try {
+      const { warns, logger } = capturingLogger();
+      const compactor = new AsyncCompactor(db, resolveCodeMemoryConfig(), logger);
+      const conv = await db.get(
+        "SELECT conversationId FROM conversations WHERE sessionId = ?",
+        "sess-starved"
+      );
+      await compactor.forceCompact(conv.conversationId);
+
+      const condensed = await db.get(
+        "SELECT COUNT(*) as n FROM summaries WHERE kind = 'condensed'"
+      );
+      expect(condensed.n).toBe(0);
+
+      const text = warns.join("\n");
+      expect(text).toContain("condensation produced nothing");
+      expect(text).toContain("minFanout 4");
     } finally {
       await db.close();
     }

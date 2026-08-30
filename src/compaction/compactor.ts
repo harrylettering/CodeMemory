@@ -163,7 +163,47 @@ export class AsyncCompactor {
     private readonly db: any,
     private readonly config: CodeMemoryConfig,
     private readonly logger: SimpleLogger
-  ) {}
+  ) {
+    this.warnIfCondensationUnreachable();
+  }
+
+  /**
+   * The condensation input window and the leaf size target are set by separate
+   * knobs that must satisfy `minFanout × leafTargetTokens <= maxInputTokens` for
+   * a batch to ever reach the fanout threshold. Nothing enforced that, so a
+   * config where the DAG can never grow a level looked exactly like a config
+   * where it simply had not grown yet. Check it once, at construction.
+   */
+  private warnIfCondensationUnreachable(): void {
+    if ((this.config.incrementalMaxDepth ?? 1) < 1) return;
+
+    const minFanout = this.config.condensedMinFanout ?? 4;
+    const leafTokens = this.config.leafTargetTokens;
+    const maxInputTokens = this.condensationInputWindowTokens();
+    const required = minFanout * leafTokens;
+    if (required <= maxInputTokens) return;
+
+    this.logger.warn(
+      `[compactor] condensation can never trigger with this configuration: ` +
+        `minFanout ${minFanout} × leafTargetTokens ${leafTokens} = ${required} tokens ` +
+        `exceeds the ${maxInputTokens}-token condensation input window ` +
+        `(min(condensedTargetTokens ${this.config.condensedTargetTokens} × 4, ` +
+        `compactionMaxInputChars ${this.config.compactionMaxInputChars} ÷ 4)). ` +
+        `Every batch will fall below minFanout and the summary DAG will stay flat.`
+    );
+  }
+
+  /**
+   * condensedTargetTokens is the TARGET size of the produced summary; × 4 also
+   * serves as the input window so a batch stays summarizable in one LLM call.
+   */
+  private condensationInputWindowTokens(): number {
+    const targetTokens = this.config.condensedTargetTokens ?? 2000;
+    return Math.min(
+      targetTokens * 4,
+      Math.floor(this.config.compactionMaxInputChars / 4)
+    );
+  }
 
   /**
    * Called after every insertMessage. Non-blocking: schedules a background
@@ -311,32 +351,66 @@ export class AsyncCompactor {
       return [];
     }
 
-    // Batch orphan leaves by token budget so each condensed row stays
-    // within a sane size. condensedTargetTokens is the TARGET size of the
-    // produced summary, but we also use it (× 4 chars/token) as the input
-    // window so each batch can be realistically summarized in one LLM call.
-    const targetTokens = this.config.condensedTargetTokens ?? 2000;
-    const maxInputTokens = Math.min(
-      targetTokens * 4,
-      Math.floor(this.config.compactionMaxInputChars / 4)
-    );
+    // Batch orphan leaves by token budget so each condensed row stays within a
+    // sane size.
+    const maxInputTokens = this.condensationInputWindowTokens();
     const batches = this.batchLeavesByTokens(orphans, maxInputTokens);
 
-    this.logger.info(
-      `[compactor] condensing ${orphans.length} leaves into ${batches.length} condensed summary/ies`
-    );
-
     const createdIds: string[] = [];
+    let skippedBatches = 0;
     for (const batch of batches) {
       if (batch.length < minFanout && batches.length > 1) {
         // A trailing sub-fanout batch (e.g. 7 leaves / minFanout 4 → [4,3]):
         // leave the stragglers un-parented so they can join the next pass.
+        skippedBatches++;
         continue;
       }
       const id = await this.condenseBatch(conversationId, batch);
       createdIds.push(id);
     }
+
+    // Report what happened, not what was attempted. This used to log
+    // "condensing N leaves into M condensed summary/ies" *before* the loop, so
+    // a pass that skipped every batch still read as a success — the DAG stayed
+    // flat for months while the log claimed otherwise.
+    if (createdIds.length > 0) {
+      this.logger.info(
+        `[compactor] condensed ${orphans.length - skippedBatches * minFanout} of ${orphans.length} un-parented leaves into ${createdIds.length} summary/ies (${skippedBatches} batch(es) left for the next pass)`
+      );
+    } else {
+      this.warnCondensationStarved(orphans, batches.length, maxInputTokens, minFanout);
+    }
+
     return createdIds;
+  }
+
+  /**
+   * Every batch fell below minFanout, so condensation ran and produced nothing.
+   * That happens when leaves are large relative to the condensation input
+   * window: at `maxInputTokens` 6000 with 3600-token leaves, each batch holds a
+   * single leaf and the sub-fanout guard then discards all of them. The DAG can
+   * never grow a level in that state, so say so with the numbers needed to fix
+   * it rather than failing silently.
+   */
+  private warnCondensationStarved(
+    orphans: LeafSummaryRow[],
+    batchCount: number,
+    maxInputTokens: number,
+    minFanout: number
+  ): void {
+    const totalTokens = orphans.reduce((sum, l) => sum + (l.tokenCount ?? 0), 0);
+    const avgLeafTokens = Math.round(totalTokens / Math.max(orphans.length, 1));
+    const leavesPerBatch = Math.floor(maxInputTokens / Math.max(avgLeafTokens, 1));
+
+    this.logger.warn(
+      `[compactor] condensation produced nothing: ${orphans.length} un-parented leaves ` +
+        `formed ${batchCount} batch(es), all below minFanout ${minFanout}. ` +
+        `Leaves average ${avgLeafTokens} tokens against a ${maxInputTokens}-token input window, ` +
+        `so a batch holds about ${leavesPerBatch}. ` +
+        `Raise CODEMEMORY_CONDENSED_TARGET_TOKENS or CODEMEMORY_COMPACTION_MAX_INPUT_CHARS, ` +
+        `lower CODEMEMORY_CONDENSED_MIN_FANOUT, or find out why leaves are oversized ` +
+        `(truncation fallbacks are pinned at the fallback cap, not leafTargetTokens).`
+    );
   }
 
   private batchLeavesByTokens(leaves: LeafSummaryRow[], maxTokens: number): LeafSummaryRow[][] {
