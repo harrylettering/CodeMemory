@@ -67,9 +67,11 @@ CodeMemory is built for three recurring pain points in coding sessions:
 
 ### Prerequisites
 
-- Node.js 18 or newer
+- **Node.js 22.5 or newer** — required, not a recommendation. Storage uses the built-in `node:sqlite`, which does not exist below 22.5, and the daemon will refuse to start with a version error.
 - Claude Code CLI
 - `jq` and `curl` available on `PATH`
+
+> **Contributors:** the `node:sqlite` dependency is deliberate and must not be traded back for a native SQLite binding. Plugin hosts install with `--ignore-scripts`, which silently skips a native package's build step and leaves every daemon start dying on "Could not locate the bindings file". A built-in has no install step to skip.
 
 ### Install from Marketplace
 

@@ -67,9 +67,11 @@ CodeMemory 主要解决三类编码场景里的持续记忆问题：
 
 ### 前置条件
 
-- Node.js 18 或更高版本
+- **Node.js 22.5 或更高版本** —— 是硬性要求而非建议。存储层使用 Node 内置的 `node:sqlite`，低于 22.5 该模块不存在，daemon 会直接报版本错误拒绝启动。
 - Claude Code CLI
 - `PATH` 中可用的 `jq` 与 `curl`
+
+> **贡献者注意：** 使用 `node:sqlite` 是刻意的选择，不得换回原生 SQLite 绑定。插件宿主以 `--ignore-scripts` 安装依赖，会静默跳过原生包的编译步骤，导致每次 daemon 启动都死在 "Could not locate the bindings file"。内置模块没有可被跳过的安装步骤。
 
 ### 通过 Marketplace 安装
 
