@@ -165,7 +165,9 @@ The mark skills post through `hooks/scripts/codememory-mark.sh`, and the daemon 
 
 ### Slash commands
 
-`/codememory-status`, `/codememory-grep`, `/codememory-describe`, `/codememory-expand`, `/codememory-expand-query`, `/codememory-watch`
+`/codememory-status`, `/codememory-grep`, `/codememory-describe`, `/codememory-expand`, `/codememory-expand-query`, `/codememory-watch`, `/codememory-reimport`
+
+`/codememory-reimport` rebuilds one session from its transcript on disk. The daemon ingests **live only** — transcripts already present when it starts are treated as handled, so a restart never re-reads them and cannot duplicate rows. The gap that leaves is deliberate: a session that ran while the daemon was down is closed with this command rather than guessed at on every boot. It deletes the session's stored data before replaying, which is what makes running it twice equivalent to running it once.
 
 ## Documentation
 
