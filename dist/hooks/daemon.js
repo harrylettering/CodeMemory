@@ -10,6 +10,7 @@ import * as http from "node:http";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { startProjectWatcher } from "./project-watcher-manager.js";
+import { buildExtractionTranscript, extractKeyMemories, } from "../memory/extract-key-memories.js";
 import { resolveCodeMemoryConfig } from "../db/config.js";
 import { createCodeMemoryDatabaseConnection } from "../db/connection.js";
 import { ConversationStore } from "../store/conversation-store.js";
@@ -201,6 +202,30 @@ async function startDaemon(args) {
             // SessionEnd hooks. Body is optional JSON `{sessionId?}`; defaults to
             // the daemon's own sessionId. Fire-and-forget: we 202 immediately and
             // run the work in the background so the hook never blocks the user.
+            if (req.url === "/reimport") {
+                const chunks = [];
+                req.on("data", (c) => chunks.push(c));
+                req.on("end", async () => {
+                    try {
+                        const raw = Buffer.concat(chunks).toString("utf-8").trim();
+                        const body = raw ? JSON.parse(raw) : {};
+                        const target = typeof body.sessionId === "string" && body.sessionId
+                            ? body.sessionId
+                            : sessionId;
+                        logger.info(`[reimport] rebuilding session ${target}`);
+                        const result = await reimportSession(target);
+                        logger.info(`[reimport] ${JSON.stringify(result)}`);
+                        res.writeHead(200, { "content-type": "application/json" });
+                        res.end(JSON.stringify({ ok: true, ...result }));
+                    }
+                    catch (err) {
+                        logger.error(`[reimport] failed: ${err}`);
+                        res.writeHead(500, { "content-type": "application/json" });
+                        res.end(JSON.stringify({ ok: false, error: String(err) }));
+                    }
+                });
+                return;
+            }
             if (req.url === "/compact") {
                 const chunks = [];
                 req.on("data", (c) => chunks.push(c));
@@ -390,190 +415,366 @@ async function startDaemon(args) {
             }
             return e;
         };
+        /**
+         * The one place a transcript line becomes rows. The watcher calls it
+         * live; /reimport calls it again when rebuilding a session from its
+         * jsonl, so both paths cannot drift apart.
+         */
+        const ingestOne = async (message, filePath) => {
+            // Get or create conversation for this session
+            const fileName = path.basename(filePath, ".jsonl");
+            const fileSessionId = fileName || sessionId;
+            try {
+                // Extract phase: observe every message for mutation tracking
+                // (even if it might be dropped later).
+                const extractor = getExtractor(fileSessionId);
+                const conversation = await conversationStore.getOrCreateConversation({
+                    sessionId: fileSessionId,
+                });
+                const nextSeqResult = await conversationStore.getDatabase().get(`SELECT MAX(seq) as maxSeq FROM conversation_messages WHERE conversationId = ?`, conversation.conversationId);
+                const seq = (nextSeqResult?.maxSeq ?? -1) + 1;
+                extractor.observeMessage(message, seq);
+                // Filter/Score: decide tier + final content. N tier is dropped.
+                const scorerState = await getScorerState(fileSessionId, conversation.conversationId);
+                const score = scoreMessage(message, scorerState, {
+                    exploredTargetWindowMs: config.exploredTargetWindowMs,
+                });
+                // Flush dedup state regardless of tier — even N (duplicate)
+                // messages update lastSeenAt on the pattern side; and on first-
+                // seen targets we want to persist before a potential crash.
+                try {
+                    await flushExploredTargets(db, conversation.conversationId, scorerState);
+                }
+                catch (err) {
+                    logger.warn(`flushExploredTargets failed: ${err}`);
+                }
+                if (score.tier === "N") {
+                    logger.debug(`Dropping ${message.role} message (N tier, tags=${score.tags.join(",")})`);
+                    return;
+                }
+                logger.debug(`Ingesting ${message.role} message: tier=${score.tier} tags=${score.tags.join(",")}`);
+                const tokenCount = Math.ceil((score.content || "").length / 4);
+                const insertedMessage = await conversationStore.insertMessage({
+                    conversationId: conversation.conversationId,
+                    role: message.role || "assistant",
+                    content: score.content,
+                    tokenCount,
+                    tier: score.tier,
+                    tags: score.tags,
+                    parts: [{
+                            partType: "text",
+                            textContent: score.content,
+                        }],
+                });
+                try {
+                    await fixAttemptTracker.observeToolUses(message, {
+                        conversationId: conversation.conversationId,
+                        sessionId: fileSessionId,
+                        seq,
+                        messageId: insertedMessage.messageId,
+                    });
+                }
+                catch (err) {
+                    logger.warn(`fixAttemptTracker.observeToolUses failed: ${err}`);
+                }
+                // Async compaction check — fires in background, never blocks ingest.
+                compactor.maybeCompact(conversation.conversationId);
+                // Auto-resolve sweep: any active failure node older than the
+                // staleness window (and with no later recurrence on the same
+                // signature) gets marked resolved. Runs once per ingested
+                // message so the PreToolUse hook stops warning about solved
+                // problems promptly.
+                try {
+                    const resolvedCount = await memoryStore.autoResolveStaleFailureNodes({
+                        conversationId: conversation.conversationId,
+                        currentSeq: seq,
+                        olderThanSeqs: RESOLVE_STALE_WINDOW,
+                        resolution: `auto: no recurrence within ${RESOLVE_STALE_WINDOW} seqs`,
+                    });
+                    if (resolvedCount > 0) {
+                        logger.debug(`auto-resolved ${resolvedCount} stale failure node(s)`);
+                    }
+                }
+                catch (err) {
+                    logger.warn(`autoResolveStaleFailureNodes failed: ${err}`);
+                }
+                // User-signal resolution: if a user message reads as "fixed /
+                // works now / 好了", mark the most recent active failure on
+                // the same target as resolved. This is the explicit closing
+                // signal that complements the staleness sweep.
+                if (message.role === "user" &&
+                    USER_RESOLVED_PATTERNS.some((re) => re.test(message.content || ""))) {
+                    // Most recent mutation tells us which target the user is
+                    // referring to. Without this we'd resolve everything, which
+                    // is too aggressive.
+                    const recentMutation = extractor.getMostRecentMutation();
+                    if (recentMutation) {
+                        try {
+                            const n = await memoryStore.resolveFailureNodesByTarget({
+                                conversationId: conversation.conversationId,
+                                target: {
+                                    filePath: recentMutation.filePath,
+                                    command: recentMutation.command,
+                                },
+                                resolution: `user signaled resolution: "${(message.content || "").slice(0, 80)}"`,
+                                evidenceMessageId: insertedMessage.messageId,
+                            });
+                            if (n > 0) {
+                                logger.debug(`user-resolved ${n} failure node(s)`);
+                            }
+                        }
+                        catch (err) {
+                            logger.warn(`resolveFailureNodesByTarget failed: ${err}`);
+                        }
+                    }
+                }
+                // Extract failure if this is an error and write directly as a
+                // memory_node (kind='failure'). Then check whether a prior
+                // failure with the same anchors should be reopened.
+                const failureNodeIds = [];
+                if (score.tags.includes("error")) {
+                    const extracted = extractor.extractFromErrorMessage(message, conversation.conversationId, seq);
+                    if (extracted) {
+                        logger.debug(`Extracting failure (type=${extracted.type}, file=${extracted.filePath}, cmd=${extracted.command})`);
+                        const failureNode = await memoryStore.createFailureNode({
+                            conversationId: conversation.conversationId,
+                            sessionId: fileSessionId,
+                            seq,
+                            type: extracted.type,
+                            signature: extracted.signature,
+                            raw: extracted.raw,
+                            location: extracted.location,
+                            attemptedFix: extracted.attemptedFix,
+                            filePath: extracted.filePath,
+                            command: extracted.command,
+                            symbol: extracted.symbol,
+                            messageId: extracted.messageId,
+                            evidenceMessageId: insertedMessage.messageId,
+                            weight: 1.0,
+                        });
+                        failureNodeIds.push(failureNode.nodeId);
+                        try {
+                            await lifecycleResolver.reopenFailure({
+                                conversationId: conversation.conversationId,
+                                files: extracted.filePath ? [extracted.filePath] : [],
+                                commands: extracted.command ? [extracted.command] : [],
+                                symbols: extracted.symbol ? [extracted.symbol] : [],
+                                signatures: [extracted.signature],
+                                newFailureNodeId: failureNode.nodeId,
+                                evidenceMessageId: insertedMessage.messageId,
+                                reason: `failure recurred: ${extracted.type} ${extracted.signature.slice(0, 80)}`,
+                            });
+                        }
+                        catch (err) {
+                            logger.warn(`reopenFailure failed: ${err}`);
+                        }
+                    }
+                }
+                const nowMs = Date.now();
+                if (nowMs - lastStaleMaintenanceAt >= STALE_MAINTENANCE_INTERVAL_MS) {
+                    lastStaleMaintenanceAt = nowMs;
+                    try {
+                        const result = await memoryStore.runStaleMaintenance({ limit: 100 });
+                        if (result.staleNodeIds.length > 0) {
+                            logger.debug(`marked ${result.staleNodeIds.length} memory node(s) stale`);
+                        }
+                    }
+                    catch (err) {
+                        logger.warn(`memory stale maintenance failed: ${err}`);
+                    }
+                }
+                try {
+                    await fixAttemptTracker.observeToolResults(message, {
+                        conversationId: conversation.conversationId,
+                        sessionId: fileSessionId,
+                        seq,
+                        messageId: insertedMessage.messageId,
+                        failureNodeIds,
+                    });
+                }
+                catch (err) {
+                    logger.warn(`fixAttemptTracker.observeToolResults failed: ${err}`);
+                }
+            }
+            catch (error) {
+                logger.error(`Failed to ingest message: ${error}`);
+            }
+        };
+        /**
+         * Remove everything a conversation owns, so a re-import rebuilds from a
+         * clean slate rather than layering a second copy on top.
+         *
+         * Deliberately total, including memory nodes. Partial deletion would leave
+         * summary nodes pointing at summaryIds that no longer exist and would let
+         * the failure/fix_attempt extractors re-derive rows that are already
+         * present. The nodes that cannot be rebuilt from a transcript — decisions,
+         * tasks, constraints — are recovered by the extraction pass instead.
+         */
+        const purgeConversation = async (conversationId) => {
+            const nodeIds = `SELECT nodeId FROM memory_nodes WHERE conversationId = ${conversationId}`;
+            const summaryIds = `SELECT summaryId FROM summaries WHERE conversationId = ${conversationId}`;
+            const messageIds = `SELECT messageId FROM conversation_messages WHERE conversationId = ${conversationId}`;
+            const counts = {};
+            const removed = async (table, where) => {
+                const before = await db.get(`SELECT COUNT(*) AS n FROM ${table} WHERE ${where}`);
+                await db.run(`DELETE FROM ${table} WHERE ${where}`);
+                if (before?.n)
+                    counts[table] = before.n;
+            };
+            await db.exec("BEGIN");
+            try {
+                await removed("memory_tags", `nodeId IN (${nodeIds})`);
+                await removed("memory_relations", `fromNodeId IN (${nodeIds}) OR toNodeId IN (${nodeIds})`);
+                await removed("memory_lifecycle_events", `nodeId IN (${nodeIds})`);
+                await removed("memory_pending_updates", `targetNodeId IN (${nodeIds})`);
+                await removed("memory_nodes", `conversationId = ${conversationId}`);
+                await removed("summary_messages", `summaryId IN (${summaryIds})`);
+                await removed("summary_parents", `summaryId IN (${summaryIds}) OR parentSummaryId IN (${summaryIds})`);
+                await removed("summaries", `conversationId = ${conversationId}`);
+                await removed("message_parts", `messageId IN (${messageIds})`);
+                await removed("conversation_messages", `conversationId = ${conversationId}`);
+                await removed("conversation_context", `conversationId = ${conversationId}`);
+                await removed("attempt_spans", `conversationId = ${conversationId}`);
+                await removed("explored_targets", `conversationId = ${conversationId}`);
+                await removed("conversation_bootstrap_state", `conversationId = ${conversationId}`);
+                await removed("conversations", `conversationId = ${conversationId}`);
+                await db.exec("COMMIT");
+            }
+            catch (err) {
+                await db.exec("ROLLBACK");
+                throw err;
+            }
+            return counts;
+        };
+        /**
+         * Recover the memory kinds no deterministic rule produces. Failures here
+         * are logged, not thrown: a session rebuilt without its decisions is worth
+         * more than a re-import that aborts halfway.
+         */
+        const rebuildKeyMemories = async (conversationId, targetSessionId, rawFileContent) => {
+            const counts = { decision: 0, task: 0, constraint: 0, skipped: false };
+            // Prose only — user asks, assistant replies, assistant reasoning. Tool
+            // calls and results are the bulk of a transcript and hold none of the
+            // memory kinds this pass looks for.
+            const transcript = buildExtractionTranscript(rawFileContent);
+            if (!transcript.trim())
+                return counts;
+            logger.info(`[reimport] extraction input is ${transcript.length} chars of prose, from a ${rawFileContent.length}-char transcript`);
+            let extracted;
+            try {
+                extracted = await extractKeyMemories(transcript, {
+                    model: config.compactionModel,
+                    log: logger,
+                });
+            }
+            catch (err) {
+                logger.warn(`[reimport] key-memory extraction failed: ${err}`);
+                counts.skipped = true;
+                return counts;
+            }
+            for (const item of extracted) {
+                try {
+                    if (item.kind === "decision") {
+                        await memoryStore.createDecisionNode({
+                            conversationId,
+                            sessionId: targetSessionId,
+                            decision: item.statement,
+                            rationale: item.rationale,
+                            alternativesRejected: item.alternativesRejected,
+                            content: item.rationale
+                                ? `${item.statement}\n\n${item.rationale}`
+                                : item.statement,
+                        });
+                    }
+                    else if (item.kind === "task") {
+                        await memoryStore.createTaskNode({
+                            conversationId,
+                            sessionId: targetSessionId,
+                            task: item.statement,
+                            details: item.rationale,
+                        });
+                    }
+                    else {
+                        await memoryStore.createConstraintNode({
+                            conversationId,
+                            sessionId: targetSessionId,
+                            constraint: item.statement,
+                            details: item.rationale,
+                        });
+                    }
+                    counts[item.kind]++;
+                }
+                catch (err) {
+                    logger.warn(`[reimport] could not store ${item.kind}: ${err}`);
+                }
+            }
+            logger.info(`[reimport] recovered ${counts.decision} decision(s), ${counts.task} task(s), ${counts.constraint} constraint(s)`);
+            return counts;
+        };
+        /**
+         * Rebuild one session from its transcript: drop what is stored, replay
+         * every line through the same ingest path the watcher uses, then recover
+         * the memory kinds that deterministic rules cannot produce.
+         */
+        const reimportSession = async (targetSessionId) => {
+            if (!watcher)
+                throw new Error("watcher is not running");
+            const filePath = path.join(watcher.watchDirectory, `${targetSessionId}.jsonl`);
+            if (!fs.existsSync(filePath)) {
+                throw new Error(`no transcript at ${filePath}`);
+            }
+            const existing = await conversationStore.getConversationForSession({
+                sessionId: targetSessionId,
+            });
+            const deleted = existing
+                ? await purgeConversation(existing.conversationId)
+                : {};
+            // Per-session in-memory state describes rows that no longer exist.
+            extractors.delete(targetSessionId);
+            scorerStates.delete(targetSessionId);
+            const messages = await watcher.readAllMessages(filePath);
+            for (const message of messages) {
+                await ingestOne(message, filePath);
+            }
+            // The replayed file is now fully consumed; keep the live watcher from
+            // treating it as a backlog on the next poll.
+            await watcher.markFileConsumed(filePath);
+            const rebuilt = await conversationStore.getConversationForSession({
+                sessionId: targetSessionId,
+            });
+            // Deterministic rules have now recovered failures, fix attempts and
+            // summaries. Decisions, tasks and constraints are stated in prose and
+            // have no rule that produces them, so read them back with the model.
+            let keyMemories = { decision: 0, task: 0, constraint: 0, skipped: false };
+            if (rebuilt && !config.compactionDisableLlm) {
+                keyMemories = await rebuildKeyMemories(rebuilt.conversationId, targetSessionId, await fs.promises.readFile(filePath, "utf-8"));
+            }
+            else if (rebuilt) {
+                keyMemories.skipped = true;
+                logger.info("[reimport] key-memory extraction skipped (LLM disabled by configuration)");
+            }
+            const stored = rebuilt
+                ? await db.get("SELECT COUNT(*) AS n FROM conversation_messages WHERE conversationId = ?", rebuilt.conversationId)
+                : { n: 0 };
+            return {
+                sessionId: targetSessionId,
+                transcript: filePath,
+                deleted,
+                linesParsed: messages.length,
+                messagesStored: stored?.n ?? 0,
+                conversationId: rebuilt?.conversationId ?? null,
+                keyMemories,
+            };
+        };
         watcher = await startProjectWatcher(logger, {
             sessionId,
             projectPath,
             pollInterval: 2000,
-            onMessage: async (message, filePath) => {
-                // Get or create conversation for this session
-                const fileName = path.basename(filePath, ".jsonl");
-                const fileSessionId = fileName || sessionId;
-                try {
-                    // Extract phase: observe every message for mutation tracking
-                    // (even if it might be dropped later).
-                    const extractor = getExtractor(fileSessionId);
-                    const conversation = await conversationStore.getOrCreateConversation({
-                        sessionId: fileSessionId,
-                    });
-                    const nextSeqResult = await conversationStore.getDatabase().get(`SELECT MAX(seq) as maxSeq FROM conversation_messages WHERE conversationId = ?`, conversation.conversationId);
-                    const seq = (nextSeqResult?.maxSeq ?? -1) + 1;
-                    extractor.observeMessage(message, seq);
-                    // Filter/Score: decide tier + final content. N tier is dropped.
-                    const scorerState = await getScorerState(fileSessionId, conversation.conversationId);
-                    const score = scoreMessage(message, scorerState, {
-                        exploredTargetWindowMs: config.exploredTargetWindowMs,
-                    });
-                    // Flush dedup state regardless of tier — even N (duplicate)
-                    // messages update lastSeenAt on the pattern side; and on first-
-                    // seen targets we want to persist before a potential crash.
-                    try {
-                        await flushExploredTargets(db, conversation.conversationId, scorerState);
-                    }
-                    catch (err) {
-                        logger.warn(`flushExploredTargets failed: ${err}`);
-                    }
-                    if (score.tier === "N") {
-                        logger.debug(`Dropping ${message.role} message (N tier, tags=${score.tags.join(",")})`);
-                        return;
-                    }
-                    logger.debug(`Ingesting ${message.role} message: tier=${score.tier} tags=${score.tags.join(",")}`);
-                    const tokenCount = Math.ceil((score.content || "").length / 4);
-                    const insertedMessage = await conversationStore.insertMessage({
-                        conversationId: conversation.conversationId,
-                        role: message.role || "assistant",
-                        content: score.content,
-                        tokenCount,
-                        tier: score.tier,
-                        tags: score.tags,
-                        parts: [{
-                                partType: "text",
-                                textContent: score.content,
-                            }],
-                    });
-                    try {
-                        await fixAttemptTracker.observeToolUses(message, {
-                            conversationId: conversation.conversationId,
-                            sessionId: fileSessionId,
-                            seq,
-                            messageId: insertedMessage.messageId,
-                        });
-                    }
-                    catch (err) {
-                        logger.warn(`fixAttemptTracker.observeToolUses failed: ${err}`);
-                    }
-                    // Async compaction check — fires in background, never blocks ingest.
-                    compactor.maybeCompact(conversation.conversationId);
-                    // Auto-resolve sweep: any active failure node older than the
-                    // staleness window (and with no later recurrence on the same
-                    // signature) gets marked resolved. Runs once per ingested
-                    // message so the PreToolUse hook stops warning about solved
-                    // problems promptly.
-                    try {
-                        const resolvedCount = await memoryStore.autoResolveStaleFailureNodes({
-                            conversationId: conversation.conversationId,
-                            currentSeq: seq,
-                            olderThanSeqs: RESOLVE_STALE_WINDOW,
-                            resolution: `auto: no recurrence within ${RESOLVE_STALE_WINDOW} seqs`,
-                        });
-                        if (resolvedCount > 0) {
-                            logger.debug(`auto-resolved ${resolvedCount} stale failure node(s)`);
-                        }
-                    }
-                    catch (err) {
-                        logger.warn(`autoResolveStaleFailureNodes failed: ${err}`);
-                    }
-                    // User-signal resolution: if a user message reads as "fixed /
-                    // works now / 好了", mark the most recent active failure on
-                    // the same target as resolved. This is the explicit closing
-                    // signal that complements the staleness sweep.
-                    if (message.role === "user" &&
-                        USER_RESOLVED_PATTERNS.some((re) => re.test(message.content || ""))) {
-                        // Most recent mutation tells us which target the user is
-                        // referring to. Without this we'd resolve everything, which
-                        // is too aggressive.
-                        const recentMutation = extractor.getMostRecentMutation();
-                        if (recentMutation) {
-                            try {
-                                const n = await memoryStore.resolveFailureNodesByTarget({
-                                    conversationId: conversation.conversationId,
-                                    target: {
-                                        filePath: recentMutation.filePath,
-                                        command: recentMutation.command,
-                                    },
-                                    resolution: `user signaled resolution: "${(message.content || "").slice(0, 80)}"`,
-                                    evidenceMessageId: insertedMessage.messageId,
-                                });
-                                if (n > 0) {
-                                    logger.debug(`user-resolved ${n} failure node(s)`);
-                                }
-                            }
-                            catch (err) {
-                                logger.warn(`resolveFailureNodesByTarget failed: ${err}`);
-                            }
-                        }
-                    }
-                    // Extract failure if this is an error and write directly as a
-                    // memory_node (kind='failure'). Then check whether a prior
-                    // failure with the same anchors should be reopened.
-                    const failureNodeIds = [];
-                    if (score.tags.includes("error")) {
-                        const extracted = extractor.extractFromErrorMessage(message, conversation.conversationId, seq);
-                        if (extracted) {
-                            logger.debug(`Extracting failure (type=${extracted.type}, file=${extracted.filePath}, cmd=${extracted.command})`);
-                            const failureNode = await memoryStore.createFailureNode({
-                                conversationId: conversation.conversationId,
-                                sessionId: fileSessionId,
-                                seq,
-                                type: extracted.type,
-                                signature: extracted.signature,
-                                raw: extracted.raw,
-                                location: extracted.location,
-                                attemptedFix: extracted.attemptedFix,
-                                filePath: extracted.filePath,
-                                command: extracted.command,
-                                symbol: extracted.symbol,
-                                messageId: extracted.messageId,
-                                evidenceMessageId: insertedMessage.messageId,
-                                weight: 1.0,
-                            });
-                            failureNodeIds.push(failureNode.nodeId);
-                            try {
-                                await lifecycleResolver.reopenFailure({
-                                    conversationId: conversation.conversationId,
-                                    files: extracted.filePath ? [extracted.filePath] : [],
-                                    commands: extracted.command ? [extracted.command] : [],
-                                    symbols: extracted.symbol ? [extracted.symbol] : [],
-                                    signatures: [extracted.signature],
-                                    newFailureNodeId: failureNode.nodeId,
-                                    evidenceMessageId: insertedMessage.messageId,
-                                    reason: `failure recurred: ${extracted.type} ${extracted.signature.slice(0, 80)}`,
-                                });
-                            }
-                            catch (err) {
-                                logger.warn(`reopenFailure failed: ${err}`);
-                            }
-                        }
-                    }
-                    const nowMs = Date.now();
-                    if (nowMs - lastStaleMaintenanceAt >= STALE_MAINTENANCE_INTERVAL_MS) {
-                        lastStaleMaintenanceAt = nowMs;
-                        try {
-                            const result = await memoryStore.runStaleMaintenance({ limit: 100 });
-                            if (result.staleNodeIds.length > 0) {
-                                logger.debug(`marked ${result.staleNodeIds.length} memory node(s) stale`);
-                            }
-                        }
-                        catch (err) {
-                            logger.warn(`memory stale maintenance failed: ${err}`);
-                        }
-                    }
-                    try {
-                        await fixAttemptTracker.observeToolResults(message, {
-                            conversationId: conversation.conversationId,
-                            sessionId: fileSessionId,
-                            seq,
-                            messageId: insertedMessage.messageId,
-                            failureNodeIds,
-                        });
-                    }
-                    catch (err) {
-                        logger.warn(`fixAttemptTracker.observeToolResults failed: ${err}`);
-                    }
-                }
-                catch (error) {
-                    logger.error(`Failed to ingest message: ${error}`);
-                }
-            },
+            // Live ingestion only: transcripts already on disk when the daemon
+            // starts are treated as handled, so a restart cannot re-emit their
+            // prefixes as duplicate rows. Gaps are closed with /reimport.
+            seedExistingFilesToEnd: true,
+            onMessage: ingestOne,
         });
         logger.info("Daemon running, watching project directory");
         // Handle shutdown
