@@ -165,7 +165,9 @@ Mark 类 Skill 会通过 `hooks/scripts/codememory-mark.sh` 发送请求，而 d
 
 ### Slash 命令
 
-`/codememory-status`、`/codememory-grep`、`/codememory-describe`、`/codememory-expand`、`/codememory-expand-query`、`/codememory-watch`
+`/codememory-status`、`/codememory-grep`、`/codememory-describe`、`/codememory-expand`、`/codememory-expand-query`、`/codememory-watch`、`/codememory-reimport`
+
+`/codememory-reimport` 从磁盘上的 transcript 重建单个会话。daemon **只做实时摄入** —— 启动时已存在的 transcript 一律视为已处理，所以重启不会重读、也就不会产生重复行。由此留下的缺口是有意的：daemon 停机期间跑过的会话，用这条命令显式补齐，而不是每次启动都去猜。它会先删除该会话已存的数据再重放，这正是"跑两次等同于跑一次"的原因。
 
 ## 文档
 
