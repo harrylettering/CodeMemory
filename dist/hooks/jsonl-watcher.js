@@ -182,6 +182,29 @@ export class CodeMemoryJsonlWatcher {
     /**
      * Read new lines from a JSONL file
      */
+    /**
+     * Resume position for a file, in the same units readNewLines uses.
+     *
+     * The offset map is process-local, so a restart previously rewound every
+     * watched file to 0 and re-emitted its whole prefix. The daemon persists
+     * these values and seeds them back through here.
+     */
+    getOffset(filePath) {
+        return this.watchedFiles.get(filePath) || 0;
+    }
+    seedOffset(filePath, offset) {
+        this.watchedFiles.set(filePath, Math.max(0, offset));
+    }
+    /** Byte-equivalent length of the file as readNewLines measures it. */
+    async currentLength(filePath) {
+        try {
+            const content = await readFile(filePath, "utf-8");
+            return content.length;
+        }
+        catch {
+            return 0;
+        }
+    }
     async readNewLines(filePath) {
         const lastOffset = this.watchedFiles.get(filePath) || 0;
         const lines = await this.readFileLines(filePath, lastOffset);
