@@ -15,20 +15,23 @@ import { buildClaudeCliArgs, claudeCliSpawnEnv, describeClaudeCliFailure, } from
 const DEFAULT_CHUNK_CHARS = 24_000;
 const DEFAULT_MAX_CHUNKS = 20;
 const DEFAULT_TIMEOUT_MS = 60_000;
-const PROMPT = `You are reading an excerpt of a software engineering session transcript.
+const PROMPT = `You are reading an excerpt of a software engineering session transcript, in chronological order.
 
-Extract only durable engineering memory of three kinds:
+Extract durable engineering memory of three kinds:
 - "decision": a technical choice that was committed to (schema shape, library, refactor direction, boundary). Include why, and any alternative explicitly rejected.
 - "task": a non-trivial objective the work is pursuing.
 - "constraint": a hard rule the work must respect (compatibility boundary, performance budget, security or compliance requirement, an explicit must-not).
 
+A session changes its mind. When a later statement replaces an earlier one — a decision reversed, a task retargeted, a constraint relaxed or tightened — report BOTH, in the order they occurred, and set "revises" on the later one to the exact "statement" text of the item it replaces. Do not silently drop the earlier version: how the work arrived at its position is part of the record.
+
 Rules:
 - Extract only what the transcript states or clearly commits to. Never infer, generalize, or invent.
-- Skip trivia, exploratory musing, and anything later abandoned in the same excerpt.
+- List items in the order they appear.
+- Skip trivia and exploratory musing that was never committed to.
 - Prefer few high-value items over many weak ones. An excerpt with nothing durable yields an empty list.
 
 Reply with JSON only, no prose and no code fence:
-{"items":[{"kind":"decision|task|constraint","statement":"...","rationale":"...","alternativesRejected":["..."]}]}`;
+{"items":[{"kind":"decision|task|constraint","statement":"...","rationale":"...","alternativesRejected":["..."],"revises":"..."}]}`;
 /**
  * Build the text an extraction pass should read, straight from the raw
  * transcript.
@@ -94,7 +97,15 @@ export async function extractKeyMemories(transcript, options = {}) {
     const collected = [];
     for (let i = 0; i < chunks.length; i++) {
         try {
-            const raw = await runClaude(`${PROMPT}\n\n--- transcript excerpt ${i + 1}/${chunks.length} ---\n${chunks[i]}`, options);
+            // Carry what earlier chunks produced into this one. Without it a
+            // revision can only ever be spotted inside a single excerpt, and a
+            // decision reversed two chunks later reads as an unrelated second
+            // decision.
+            const priorContext = collected.length > 0
+                ? `\n\n--- already extracted from earlier excerpts (set "revises" to one of these statements if this excerpt replaces it) ---\n` +
+                    collected.map((m) => `- [${m.kind}] ${m.statement}`).join("\n")
+                : "";
+            const raw = await runClaude(`${PROMPT}${priorContext}\n\n--- transcript excerpt ${i + 1}/${chunks.length} ---\n${chunks[i]}`, options);
             collected.push(...parseItems(raw));
         }
         catch (error) {
@@ -153,15 +164,32 @@ function parseItems(raw) {
             alternativesRejected: Array.isArray(item?.alternativesRejected)
                 ? item.alternativesRejected.filter((a) => typeof a === "string")
                 : undefined,
+            revises: typeof item?.revises === "string" && item.revises.trim()
+                ? item.revises.trim()
+                : undefined,
         };
     })
         .filter((x) => x !== null);
 }
-/** Chunks overlap in subject matter, so the same decision can be reported twice. */
+/**
+ * Collapse only exact restatements — the same item reported twice because
+ * chunks overlap in subject matter.
+ *
+ * An item carrying `revises` is never folded away even if its statement
+ * matches something seen before: it is a distinct point in the session's
+ * history, and dropping it would flatten the revision chain this pass exists
+ * to preserve. Order is preserved throughout, because the rebuild creates
+ * nodes in sequence and each supersede has to land on a node that already
+ * exists.
+ */
 function dedupe(items) {
     const seen = new Set();
     const out = [];
     for (const item of items) {
+        if (item.revises) {
+            out.push(item);
+            continue;
+        }
         const key = `${item.kind}:${item.statement.toLowerCase().replace(/\s+/g, " ")}`;
         if (seen.has(key))
             continue;

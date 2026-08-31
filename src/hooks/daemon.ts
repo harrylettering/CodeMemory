@@ -779,8 +779,8 @@ async function startDaemon(args: string[]) {
       conversationId: number,
       targetSessionId: string,
       rawFileContent: string
-    ): Promise<{ decision: number; task: number; constraint: number; skipped: boolean }> => {
-      const counts = { decision: 0, task: 0, constraint: 0, skipped: false };
+    ): Promise<{ decision: number; task: number; constraint: number; superseded: number; skipped: boolean }> => {
+      const counts = { decision: 0, task: 0, constraint: 0, superseded: 0, skipped: false };
       // Prose only — user asks, assistant replies, assistant reasoning. Tool
       // calls and results are the bulk of a transcript and hold none of the
       // memory kinds this pass looks for.
@@ -803,10 +803,34 @@ async function startDaemon(args: string[]) {
         return counts;
       }
 
+      // Items arrive in the order they occurred, so a revision always follows
+      // the node it replaces and can resolve to a nodeId that already exists.
+      const nodeIdByStatement = new Map<string, string>();
+      const statementKey = (kind: string, statement: string) =>
+        `${kind}:${statement.toLowerCase().replace(/\s+/g, " ")}`;
+
+      let supersedes = 0;
       for (const item of extracted) {
         try {
+          // A session revises itself. Recording only the final position would
+          // discard how it got there, which is exactly what makes the earlier
+          // decisions worth keeping — so the replaced node is superseded, not
+          // deleted, matching what the live mark path does.
+          let supersedesNodeId: string | undefined;
+          if (item.revises) {
+            supersedesNodeId = nodeIdByStatement.get(
+              statementKey(item.kind, item.revises)
+            );
+            if (!supersedesNodeId) {
+              logger.debug(
+                `[reimport] "${item.statement}" claims to revise an item that was not extracted; storing it standalone`
+              );
+            }
+          }
+
+          let created;
           if (item.kind === "decision") {
-            await memoryStore.createDecisionNode({
+            created = await memoryStore.createDecisionNode({
               conversationId,
               sessionId: targetSessionId,
               decision: item.statement,
@@ -815,30 +839,40 @@ async function startDaemon(args: string[]) {
               content: item.rationale
                 ? `${item.statement}\n\n${item.rationale}`
                 : item.statement,
+              supersedesNodeId,
             });
           } else if (item.kind === "task") {
-            await memoryStore.createTaskNode({
+            created = await memoryStore.createTaskNode({
               conversationId,
               sessionId: targetSessionId,
               task: item.statement,
               details: item.rationale,
+              supersedesNodeId,
             });
           } else {
-            await memoryStore.createConstraintNode({
+            created = await memoryStore.createConstraintNode({
               conversationId,
               sessionId: targetSessionId,
               constraint: item.statement,
               details: item.rationale,
+              supersedesNodeId,
             });
           }
+
+          nodeIdByStatement.set(
+            statementKey(item.kind, item.statement),
+            created.nodeId
+          );
           counts[item.kind]++;
+          if (supersedesNodeId) supersedes++;
         } catch (err) {
           logger.warn(`[reimport] could not store ${item.kind}: ${err}`);
         }
       }
+      counts.superseded = supersedes;
 
       logger.info(
-        `[reimport] recovered ${counts.decision} decision(s), ${counts.task} task(s), ${counts.constraint} constraint(s)`
+        `[reimport] recovered ${counts.decision} decision(s), ${counts.task} task(s), ${counts.constraint} constraint(s); ${counts.superseded} of them supersede an earlier version`
       );
       return counts;
     };
@@ -885,7 +919,7 @@ async function startDaemon(args: string[]) {
       // Deterministic rules have now recovered failures, fix attempts and
       // summaries. Decisions, tasks and constraints are stated in prose and
       // have no rule that produces them, so read them back with the model.
-      let keyMemories = { decision: 0, task: 0, constraint: 0, skipped: false };
+      let keyMemories = { decision: 0, task: 0, constraint: 0, superseded: 0, skipped: false };
       if (rebuilt && !config.compactionDisableLlm) {
         keyMemories = await rebuildKeyMemories(
           rebuilt.conversationId,
