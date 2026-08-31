@@ -9,6 +9,7 @@
 
 import { CodeMemoryJsonlWatcher, createJsonlWatcher, FileWatchEvent, JsonlMessage } from "./jsonl-watcher.js";
 import { join } from "node:path";
+import { readdir } from "node:fs/promises";
 
 // Logger interface
 interface SimpleLogger {
@@ -26,6 +27,17 @@ export interface ProjectWatcherOptions {
   sessionId: string;
   pollInterval?: number;
   onMessage?: (message: JsonlMessage, filePath: string) => void;
+
+  /**
+   * Treat transcripts already on disk when the watcher starts as handled,
+   * ingesting only what arrives afterwards.
+   *
+   * The offset map is process-local, so without this a restart rewinds every
+   * file in the project directory to 0 and re-emits its whole prefix. Nothing
+   * dedupes on the way in, so those lines become duplicate rows. Files created
+   * after start are unaffected — they are genuinely new and read from 0.
+   */
+  seedExistingFilesToEnd?: boolean;
 }
 
 export class ProjectWatcher {
@@ -91,6 +103,10 @@ export class ProjectWatcher {
       await this.handleFileUpdate(event.filePath);
     });
 
+    if (this.options.seedExistingFilesToEnd) {
+      await this.seedExistingFiles();
+    }
+
     await this.watcher.start();
     this.isRunning = true;
     this.deps.info(`[ProjectWatcher] Started for ${this.options.projectPath}`);
@@ -104,6 +120,56 @@ export class ProjectWatcher {
     this.watcher.stop();
     this.isRunning = false;
     this.deps.info(`[ProjectWatcher] Stopped for ${this.options.projectPath}`);
+  }
+
+  /**
+   * Mark every transcript present right now as fully read. Done before the
+   * underlying watcher starts, so the initial scan reports no backlog.
+   */
+  /** Directory this watcher observes, so callers can locate a transcript. */
+  get watchDirectory(): string {
+    return this.projectWatchPath;
+  }
+
+  /**
+   * Move the read position to the end of a file. Used after a re-import has
+   * replayed it in full, so the next poll does not re-emit the same lines.
+   */
+  async markFileConsumed(filePath: string): Promise<void> {
+    const length = await this.watcher.currentLength(filePath);
+    this.watcher.seedOffset(filePath, length);
+  }
+
+  /** Full parse of one transcript, used by the re-import path. */
+  async readAllMessages(filePath: string): Promise<JsonlMessage[]> {
+    return this.watcher.readAllLines(filePath);
+  }
+
+  private async seedExistingFiles(): Promise<void> {
+    let entries: string[] = [];
+    try {
+      entries = await readdir(this.projectWatchPath);
+    } catch (error) {
+      this.deps.warn(`[ProjectWatcher] Could not list ${this.projectWatchPath}: ${error}`);
+      return;
+    }
+
+    let seeded = 0;
+    for (const name of entries) {
+      if (!name.endsWith(".jsonl")) continue;
+      const filePath = join(this.projectWatchPath, name);
+      const length = await this.watcher.currentLength(filePath);
+      if (length > 0) {
+        this.watcher.seedOffset(filePath, length);
+        seeded++;
+      }
+    }
+
+    if (seeded > 0) {
+      this.deps.info(
+        `[ProjectWatcher] Treating ${seeded} existing transcript(s) as already ingested; use the re-import command to backfill`
+      );
+    }
   }
 
   private async handleNewFile(filePath: string): Promise<void> {
