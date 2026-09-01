@@ -20,13 +20,29 @@ export interface FailureLookupResponse {
   reason: string;
   failures: FailureSurface[];
   markdown?: string;
+  /**
+   * Why this lookup did or did not surface anything.
+   *
+   * A silent PreToolUse has four distinct causes — no retrievable target, no
+   * stored candidate, everything below the confidence floor, or a debounce —
+   * and they call for opposite fixes. Without this the caller can only see
+   * "nothing was injected" and cannot tell which.
+   */
+  diagnostics: FailureLookupDiagnostics;
 }
 
-/**
- * Shape passed back to the hook layer. Mirrors what the hook script
- * cares about: a key it can use for anti-flood debounce + the rendered
- * markdown.
- */
+export interface FailureLookupDiagnostics {
+  outcome: "injected" | "below_confidence" | "no_candidates" | "no_target";
+  targetFile?: string;
+  targetCommand?: string;
+  /** Nodes the anchor query returned, before scoring. */
+  candidateCount: number;
+  /** Of those, how many cleared MIN_CONFIDENCE. */
+  passedCount: number;
+  topScore?: number;
+  surfacedNodeIds: string[];
+}
+
 export interface FailureSurface {
   nodeId: string;
   type: string;
@@ -176,6 +192,12 @@ export async function lookupForPreToolUse(
       shouldInject: false,
       reason: "No retrievable target from tool input",
       failures: [],
+      diagnostics: {
+        outcome: "no_target",
+        candidateCount: 0,
+        passedCount: 0,
+        surfacedNodeIds: [],
+      },
     };
   }
 
@@ -187,11 +209,21 @@ export async function lookupForPreToolUse(
   });
 
   const now = Date.now();
-  const scored = candidates
+  // Score everything first: the highest score among *rejected* candidates is
+  // the number that says whether the floor is the thing suppressing recall.
+  const allScored = candidates
     .map(({ node }) => ({ node, score: scoreMatch(node, targets, now) }))
-    .filter(({ score }) => score >= MIN_CONFIDENCE)
-    .sort((a, b) => b.score - a.score)
-    .slice(0, options.limit ?? 2);
+    .sort((a, b) => b.score - a.score);
+  const passed = allScored.filter(({ score }) => score >= MIN_CONFIDENCE);
+  const scored = passed.slice(0, options.limit ?? 2);
+
+  const baseDiagnostics = {
+    targetFile: targets.filePath,
+    targetCommand: targets.command,
+    candidateCount: candidates.length,
+    passedCount: passed.length,
+    topScore: allScored[0]?.score,
+  };
 
   if (scored.length === 0) {
     return {
@@ -201,6 +233,11 @@ export async function lookupForPreToolUse(
           ? `Filtered ${candidates.length} candidate(s) below confidence threshold`
           : "No prior failures for this target",
       failures: [],
+      diagnostics: {
+        ...baseDiagnostics,
+        outcome: candidates.length > 0 ? "below_confidence" : "no_candidates",
+        surfacedNodeIds: [],
+      },
     };
   }
 
@@ -210,6 +247,11 @@ export async function lookupForPreToolUse(
     reason: "Found relevant prior failures",
     failures,
     markdown: renderFailureMarkdown(failures),
+    diagnostics: {
+      ...baseDiagnostics,
+      outcome: "injected",
+      surfacedNodeIds: scored.map((s) => s.node.nodeId),
+    },
   };
 }
 

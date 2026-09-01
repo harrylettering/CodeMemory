@@ -461,6 +461,45 @@ export async function runCodeMemoryMigrations(db) {
       ON memory_nodes(sourceToolUseId)
       WHERE sourceToolUseId IS NOT NULL
   `);
+    // Migration 26: Prior-failure lookup telemetry. The PreToolUse path is the
+    // product's headline behavior and was entirely unobservable: markUsed was
+    // never called from it, so useCount stayed 0 across every failure node and
+    // the database could not say whether a warning had ever fired. Worse, a
+    // silent lookup has four different causes — no target, no candidate, below
+    // the confidence floor, debounced — and they demand opposite fixes.
+    //
+    // A row per lookup, including the ones that surfaced nothing, is what makes
+    // recall measurable and lets an injection be joined against whatever failed
+    // afterwards.
+    await db.exec(`
+    CREATE TABLE IF NOT EXISTS failure_lookup_events (
+      eventId INTEGER PRIMARY KEY AUTOINCREMENT,
+      conversationId INTEGER,
+      sessionId TEXT,
+      toolName TEXT NOT NULL,
+      targetFile TEXT,
+      targetCommand TEXT,
+      outcome TEXT NOT NULL CHECK(outcome IN (
+        'injected', 'debounced', 'below_confidence', 'no_candidates', 'no_target'
+      )),
+      candidateCount INTEGER NOT NULL DEFAULT 0,
+      passedCount INTEGER NOT NULL DEFAULT 0,
+      topScore REAL,
+      surfacedNodeIds TEXT,
+      source TEXT NOT NULL DEFAULT 'daemon',
+      createdAt TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+    await db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_failure_lookup_events_outcome ON failure_lookup_events(
+      outcome, createdAt
+    )
+  `);
+    await db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_failure_lookup_events_target ON failure_lookup_events(
+      targetFile, createdAt
+    )
+  `);
     console.log(`[codememory] Database migrations completed successfully`);
 }
 /**
