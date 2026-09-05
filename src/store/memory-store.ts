@@ -1108,6 +1108,62 @@ export class MemoryNodeStore {
       .slice(0, input.limit ?? plan.recallPolicy.maxCandidates);
   }
 
+  /**
+   * Append one row per PreToolUse lookup, including the ones that surfaced
+   * nothing. The silent outcomes are the interesting ones: they separate
+   * "there was no prior failure to warn about" from "there was, and something
+   * suppressed it", which is the difference between a recall problem and a
+   * threshold problem.
+   */
+  async recordFailureLookup(input: {
+    conversationId?: number | null;
+    sessionId?: string | null;
+    toolName: string;
+    targetFile?: string | null;
+    targetCommand?: string | null;
+    /** Normalized forms, matching memory_tags, so this row can be joined. */
+    targetFileTag?: string | null;
+    targetCommandTag?: string | null;
+    outcome:
+      | "injected"
+      | "debounced"
+      | "below_confidence"
+      | "no_candidates"
+      | "no_target";
+    candidateCount: number;
+    passedCount: number;
+    topScore?: number | null;
+    surfacedNodeIds?: string[];
+    source?: "daemon" | "cli";
+  }): Promise<void> {
+    await this.db.run(
+      `INSERT INTO failure_lookup_events (
+         conversationId, sessionId, toolName, targetFile, targetCommand,
+         targetFileTag, targetCommandTag,
+         outcome, candidateCount, passedCount, topScore, surfacedNodeIds,
+         source, createdAt
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        input.conversationId ?? null,
+        input.sessionId ?? null,
+        input.toolName,
+        input.targetFile ?? null,
+        input.targetCommand ?? null,
+        input.targetFileTag ?? null,
+        input.targetCommandTag ?? null,
+        input.outcome,
+        input.candidateCount,
+        input.passedCount,
+        input.topScore ?? null,
+        input.surfacedNodeIds?.length
+          ? JSON.stringify(input.surfacedNodeIds)
+          : null,
+        input.source ?? "daemon",
+        new Date().toISOString(),
+      ]
+    );
+  }
+
   async markUsed(nodeIds: string[]): Promise<void> {
     if (nodeIds.length === 0) return;
     const now = new Date().toISOString();
