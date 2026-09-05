@@ -1,6 +1,6 @@
 {
   "name": "codememory-plugin",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "CodeMemory plugin for Claude Code CLI. Replaces traditional sliding-window conversation compaction with a DAG-based summarization system that preserves every message while maintaining active context within model token limits.",
   "author": {
     "name": "harry"
