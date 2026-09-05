@@ -8,6 +8,7 @@
  * gets the same signal-to-noise as before — see #19 for why low-confidence
  * matches must be filtered before injection.
  */
+import { qualifyFileTag, commandVariants } from "./retrieval-plan.js";
 const MIN_CONFIDENCE = 0.6;
 const DECAY_HALF_LIFE_DAYS = 30;
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
@@ -112,6 +113,12 @@ export async function lookupForPreToolUse(store, toolName, toolInput, options = 
             shouldInject: false,
             reason: "No retrievable target from tool input",
             failures: [],
+            diagnostics: {
+                outcome: "no_target",
+                candidateCount: 0,
+                passedCount: 0,
+                surfacedNodeIds: [],
+            },
         };
     }
     const candidates = await store.findFailuresByAnchors({
@@ -121,11 +128,24 @@ export async function lookupForPreToolUse(store, toolName, toolInput, options = 
         limit: 8,
     });
     const now = Date.now();
-    const scored = candidates
+    // Score everything first: the highest score among *rejected* candidates is
+    // the number that says whether the floor is the thing suppressing recall.
+    const allScored = candidates
         .map(({ node }) => ({ node, score: scoreMatch(node, targets, now) }))
-        .filter(({ score }) => score >= MIN_CONFIDENCE)
-        .sort((a, b) => b.score - a.score)
-        .slice(0, options.limit ?? 2);
+        .sort((a, b) => b.score - a.score);
+    const passed = allScored.filter(({ score }) => score >= MIN_CONFIDENCE);
+    const scored = passed.slice(0, options.limit ?? 2);
+    const baseDiagnostics = {
+        targetFile: targets.filePath,
+        targetCommand: targets.command,
+        targetFileTag: targets.filePath ? qualifyFileTag(targets.filePath) : undefined,
+        targetCommandTag: targets.command
+            ? commandVariants(targets.command).slice(-1)[0]
+            : undefined,
+        candidateCount: candidates.length,
+        passedCount: passed.length,
+        topScore: allScored[0]?.score,
+    };
     if (scored.length === 0) {
         return {
             shouldInject: false,
@@ -133,6 +153,11 @@ export async function lookupForPreToolUse(store, toolName, toolInput, options = 
                 ? `Filtered ${candidates.length} candidate(s) below confidence threshold`
                 : "No prior failures for this target",
             failures: [],
+            diagnostics: {
+                ...baseDiagnostics,
+                outcome: candidates.length > 0 ? "below_confidence" : "no_candidates",
+                surfacedNodeIds: [],
+            },
         };
     }
     const failures = scored.map((s) => shapeFailure(s.node, s.score));
@@ -141,6 +166,11 @@ export async function lookupForPreToolUse(store, toolName, toolInput, options = 
         reason: "Found relevant prior failures",
         failures,
         markdown: renderFailureMarkdown(failures),
+        diagnostics: {
+            ...baseDiagnostics,
+            outcome: "injected",
+            surfacedNodeIds: scored.map((s) => s.node.nodeId),
+        },
     };
 }
 function formatAge(createdAt) {

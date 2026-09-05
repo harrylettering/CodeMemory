@@ -139,6 +139,36 @@ async function startDaemon(args) {
                 /* ignore */
             }
         }
+        /**
+         * Telemetry must never be able to break a tool call, so every failure here
+         * is swallowed. A missing row is a gap in measurement; a thrown error
+         * would be a blocked Edit.
+         */
+        const recordLookup = async (body, response, outcome, surfacedNodeIds) => {
+            try {
+                const conv = await conversationStore.getConversationForSession({
+                    sessionId,
+                });
+                await memoryStore.recordFailureLookup({
+                    conversationId: conv?.conversationId ?? null,
+                    sessionId,
+                    toolName: String(body?.toolName ?? "unknown"),
+                    targetFile: response.diagnostics.targetFile,
+                    targetCommand: response.diagnostics.targetCommand,
+                    targetFileTag: response.diagnostics.targetFileTag,
+                    targetCommandTag: response.diagnostics.targetCommandTag,
+                    outcome,
+                    candidateCount: response.diagnostics.candidateCount,
+                    passedCount: response.diagnostics.passedCount,
+                    topScore: response.diagnostics.topScore,
+                    surfacedNodeIds,
+                    source: "daemon",
+                });
+            }
+            catch (err) {
+                logger.warn(`recordFailureLookup failed: ${err}`);
+            }
+        };
         const lookupServer = http.createServer((req, res) => {
             if (req.method !== "POST") {
                 res.statusCode = 404;
@@ -347,6 +377,7 @@ async function startDaemon(args) {
                             return last != null && now - last < WARN_DEBOUNCE_MS;
                         });
                         if (allRecent) {
+                            await recordLookup(body, response, "debounced", keys);
                             res.setHeader("content-type", "application/json");
                             res.end(JSON.stringify({
                                 shouldInject: false,
@@ -357,7 +388,16 @@ async function startDaemon(args) {
                         }
                         for (const k of keys)
                             recentlyWarned.set(k, now);
+                        // "Used" means actually surfaced to the model, so it is recorded
+                        // here rather than at lookup time — a debounced hit is not a use.
+                        try {
+                            await memoryStore.markUsed(keys);
+                        }
+                        catch (err) {
+                            logger.warn(`markUsed failed: ${err}`);
+                        }
                     }
+                    await recordLookup(body, response, response.diagnostics.outcome, response.diagnostics.surfacedNodeIds);
                     res.setHeader("content-type", "application/json");
                     res.end(JSON.stringify(response));
                 }
