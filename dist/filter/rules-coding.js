@@ -179,6 +179,16 @@ const ERROR_RESULT_PATTERNS = [
     /\bTests?:\s+\d+ failed/i,
     /^FAIL\s+/m,
 ];
+/**
+ * Check each result's raw content rather than the watcher-prefixed flattened
+ * string, so line-anchored patterns like /^panic: /m actually fire.
+ */
+function looksLikeErrorResult(results) {
+    return results.some((r) => {
+        const text = typeof r.content === "string" ? r.content : JSON.stringify(r.content ?? "");
+        return ERROR_RESULT_PATTERNS.some((re) => re.test(text));
+    });
+}
 /** Hard cap on stored content for M-tier results to avoid blowing the row. */
 const M_TIER_CONTENT_CAP = 2000;
 // ──────────────────────────────────────────────────────────────────────────
@@ -375,6 +385,24 @@ function scoreToolResults(results, flattened, state) {
             content: capContent(flattened),
         };
     }
+    // is_error is the clean signal but not a reliable one. A shell chain
+    // swallows the exit code — `cd dir && tsc --noEmit` reports is_error=false
+    // while printing TS2322 — and so does a compiler behind a pipe or a test
+    // runner whose wrapper exits 0. The failure text is in the output either way.
+    //
+    // These patterns were consulted only in the orphan path below, so a
+    // tool_result whose tool_use *was* resolvable inherited M tier, which stores
+    // metadata rather than payload, and the error text was discarded before any
+    // failure node could be built from it. Checking here as well is what makes a
+    // swallowed exit code recoverable. The tag stays `error_inferred` — the
+    // distinction from an explicit is_error is real and worth keeping.
+    if (looksLikeErrorResult(results)) {
+        return {
+            tier: "S",
+            tags: ["tool_result", "error_inferred"],
+            content: capContent(flattened),
+        };
+    }
     // Matching tool_use was deduped or classified as noise → drop the result
     // too, otherwise L-tier dedup is defeated by the result side.
     if (originTier === "N") {
@@ -402,11 +430,7 @@ function scoreToolResults(results, flattened, state) {
     // don't lose obvious failures. Check each result's raw content (not the
     // watcher-prefixed `flattened` string) so line-start anchors like
     // /^panic: /m or /^fatal:/m actually fire.
-    const looksLikeError = results.some((r) => {
-        const text = typeof r.content === "string" ? r.content : JSON.stringify(r.content ?? "");
-        return ERROR_RESULT_PATTERNS.some((re) => re.test(text));
-    });
-    if (looksLikeError) {
+    if (looksLikeErrorResult(results)) {
         return {
             tier: "S",
             tags: ["tool_result", "error_inferred"],

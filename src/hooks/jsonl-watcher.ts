@@ -8,6 +8,7 @@
 
 import type { CodeMemoryDependencies } from "../types.js";
 import { readFile, readdir, stat } from "node:fs/promises";
+import type { Dirent } from "node:fs";
 import { join, basename, extname } from "node:path";
 
 export interface FileWatchEvent {
@@ -125,6 +126,15 @@ export class CodeMemoryJsonlWatcher {
       const files = await readdir(watchPath, { withFileTypes: true });
 
       for (const file of files) {
+        // A subagent's turns are written to
+        // `<watchPath>/<sessionId>/subagents/agent-*.jsonl`, not to the parent
+        // transcript. Skipping directories therefore skipped every tool call a
+        // subagent ever made — including the failures, which is the one class
+        // of memory that cannot be recovered from the repository afterwards.
+        if (file.isDirectory()) {
+          await this.scanSubagentDirectory(join(watchPath, file.name));
+          continue;
+        }
         if (!file.isFile()) {
           continue;
         }
@@ -149,6 +159,29 @@ export class CodeMemoryJsonlWatcher {
   /**
    * Check if a file should be watched
    */
+  /**
+   * One level deep only: `<sessionId>/subagents/`. Deliberately not a general
+   * recursive walk — the projects directory holds unrelated state, and this
+   * runs on every poll.
+   */
+  private async scanSubagentDirectory(sessionDir: string): Promise<void> {
+    const subagentDir = join(sessionDir, "subagents");
+    let entries: Dirent[];
+    try {
+      entries = await readdir(subagentDir, { withFileTypes: true });
+    } catch {
+      // No subagents for this session; not an error.
+      return;
+    }
+
+    for (const entry of entries) {
+      if (!entry.isFile()) continue;
+      const filePath = join(subagentDir, entry.name);
+      if (!this.shouldWatchFile(filePath)) continue;
+      await this.checkFile(filePath);
+    }
+  }
+
   private shouldWatchFile(filePath: string): boolean {
     const fileName = basename(filePath);
 

@@ -83,9 +83,12 @@ export function buildExtractionTranscript(rawFileContent) {
         const role = entry?.message?.role ?? entry?.type;
         if (role !== "user" && role !== "assistant")
             continue;
-        // Subagent chatter is not this session's engineering record.
-        if (entry?.isSidechain)
-            continue;
+        // Subagent turns are kept. Under a plan-and-delegate workflow the parent
+        // decides *what* to do and the subagent decides *how* — which library,
+        // which approach, which alternative to reject — and only a one-line
+        // summary comes back. Dropping these would discard the decisions
+        // themselves and keep the announcement that a decision was made.
+        const origin = entry?.isSidechain ? "SUBAGENT " : "";
         const content = entry?.message?.content;
         const segments = [];
         if (typeof content === "string") {
@@ -104,7 +107,7 @@ export function buildExtractionTranscript(rawFileContent) {
         }
         const text = segments.join("\n").trim();
         if (text)
-            out.push(`[${role.toUpperCase()}] ${text}`);
+            out.push(`[${origin}${role.toUpperCase()}] ${text}`);
     }
     return out.join("\n\n");
 }

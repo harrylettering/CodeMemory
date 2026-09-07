@@ -75,6 +75,15 @@ export class CodeMemoryJsonlWatcher {
         try {
             const files = await readdir(watchPath, { withFileTypes: true });
             for (const file of files) {
+                // A subagent's turns are written to
+                // `<watchPath>/<sessionId>/subagents/agent-*.jsonl`, not to the parent
+                // transcript. Skipping directories therefore skipped every tool call a
+                // subagent ever made — including the failures, which is the one class
+                // of memory that cannot be recovered from the repository afterwards.
+                if (file.isDirectory()) {
+                    await this.scanSubagentDirectory(join(watchPath, file.name));
+                    continue;
+                }
                 if (!file.isFile()) {
                     continue;
                 }
@@ -97,6 +106,30 @@ export class CodeMemoryJsonlWatcher {
     /**
      * Check if a file should be watched
      */
+    /**
+     * One level deep only: `<sessionId>/subagents/`. Deliberately not a general
+     * recursive walk — the projects directory holds unrelated state, and this
+     * runs on every poll.
+     */
+    async scanSubagentDirectory(sessionDir) {
+        const subagentDir = join(sessionDir, "subagents");
+        let entries;
+        try {
+            entries = await readdir(subagentDir, { withFileTypes: true });
+        }
+        catch {
+            // No subagents for this session; not an error.
+            return;
+        }
+        for (const entry of entries) {
+            if (!entry.isFile())
+                continue;
+            const filePath = join(subagentDir, entry.name);
+            if (!this.shouldWatchFile(filePath))
+                continue;
+            await this.checkFile(filePath);
+        }
+    }
     shouldWatchFile(filePath) {
         const fileName = basename(filePath);
         if (this.options.excludePattern && this.options.excludePattern.test(fileName)) {

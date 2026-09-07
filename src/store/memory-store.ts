@@ -9,6 +9,7 @@ import {
 } from "../retrieval-plan.js";
 import type { SummaryRecord } from "./summary-store.js";
 import type { DecisionSupersedeJudge } from "./decision-supersede-judge.js";
+import { isAnchorableSignature } from "../negexp/signature.js";
 
 export interface MemoryNodeStoreOptions {
   /** Enables LLM-as-judge auto-supersede for same-conversation decisions. */
@@ -1293,7 +1294,20 @@ export class MemoryNodeStore {
     const content = renderFailureContent(input);
     const tags: MemoryTagInput[] = [
       { tagType: "kind", tagValue: "failure", weight: 2.1 },
-      { tagType: "signature", tagValue: input.signature, weight: 1.8 },
+      // Index the signature only when it identifies *this* failure. One built
+      // from nothing but "a command exited non-zero" matches every other such
+      // failure, and a wrong prior-failure warning costs more trust than a
+      // missing one. The node is still stored and still reachable by file,
+      // command and symbol — only the useless anchor is withheld.
+      ...(isAnchorableSignature(input.signature)
+        ? [
+            {
+              tagType: "signature",
+              tagValue: input.signature,
+              weight: 1.8,
+            } as MemoryTagInput,
+          ]
+        : []),
       { tagType: "topic", tagValue: input.type, weight: 1.0 },
       ...(input.filePath ? fileTags([input.filePath], 2.3) : []),
       ...(input.command ? commandTags(input.command, 1.9) : []),
