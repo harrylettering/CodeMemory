@@ -56,6 +56,15 @@ DAEMON_FAILURE_REASON=""
 
 if command -v node >/dev/null 2>&1 && [ -d "${CLAUDE_PLUGIN_ROOT}/dist" ]; then
     echo "[$(date -Iseconds)] Node and dist found, starting daemon" >> "$LOG_FILE"
+    # File tags are qualified as <sha256(workspaceRoot)[:8]>:<relative-path>, and
+    # workspaceRoot falls back to process.cwd(). The `cd` below is required for
+    # the relative dist/ path to resolve, but it also makes cwd the plugin
+    # directory -- identical for every project on the machine. Without this
+    # export every repo hashed to the same key, so tags from different projects
+    # collided and absolute paths fell out of qualification entirely.
+    if [ -n "$CWD" ]; then
+        export CODEMEMORY_WORKSPACE_ROOT="$CWD"
+    fi
     cd "${CLAUDE_PLUGIN_ROOT}"
     # Fully detach daemon: close stdin, redirect stdout+stderr to log file,
     # background, and disown. If stdout stays attached to the hook pipe,

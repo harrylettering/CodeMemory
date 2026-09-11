@@ -33,6 +33,14 @@ INPUT=$(cat)
 SESSION_ID=$(printf '%s' "$INPUT" | jq -r '.session_id // "unknown"')
 TOOL_NAME=$(printf '%s' "$INPUT" | jq -r '.tool_name // ""')
 TOOL_INPUT=$(printf '%s' "$INPUT" | jq -c '.tool_input // {}')
+# The cold-start CLI qualifies file tags against CODEMEMORY_WORKSPACE_ROOT,
+# falling back to cwd. The daemon gets this exported by session-start.sh; pin
+# it here too so the read path computes the same workspace key the write path
+# used, instead of whatever directory this hook happened to inherit.
+CWD=$(printf '%s' "$INPUT" | jq -r '.cwd // ""')
+if [ -n "$CWD" ]; then
+  export CODEMEMORY_WORKSPACE_ROOT="$CWD"
+fi
 
 echo "[$(date -Iseconds)] PreToolUse for $TOOL_NAME (sid=${SESSION_ID})" >> "$LOG_FILE"
 
