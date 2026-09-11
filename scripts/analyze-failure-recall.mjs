@@ -185,5 +185,235 @@ if (hasEvents) {
   }
 }
 
+// ---- 7. LLM 判官 ----------------------------------------------------------
+// The judge writes a row for every invocation now, which is the only way to
+// separate "never triggered" from "triggered and kept everything" from
+// "failed on every call". They previously all looked like an empty table.
+const hasJudgeEvents = await db.get(
+  `SELECT name FROM sqlite_master WHERE type='table' AND name='decision_judge_events'`
+);
+if (hasJudgeEvents) {
+  const rows = await db.all(
+    `SELECT outcome, COUNT(*) n, AVG(latencyMs) ms FROM decision_judge_events
+      GROUP BY outcome ORDER BY n DESC`
+  );
+  const total = rows.reduce((s, r) => s + r.n, 0);
+  console.log("\n⑦ 自动 supersede 判官  —— 开关打开不等于跑过");
+  if (total === 0) {
+    line("调用次数", "0（埋点已就绪；此前无法区分「没触发」与「跑了但都判 KEEP」）");
+  } else {
+    for (const r of rows) {
+      const ms = r.ms ? `  均 ${Math.round(r.ms)}ms` : "";
+      line(r.outcome, `${r.n}  ${pct(r.n, total)}${ms}`);
+    }
+    const errs = await db.all(
+      `SELECT errorMessage, COUNT(*) n FROM decision_judge_events
+        WHERE outcome = 'error' GROUP BY errorMessage ORDER BY n DESC LIMIT 3`
+    );
+    for (const e of errs) {
+      line("  失败原因", `${String(e.errorMessage).slice(0, 70)} ×${e.n}`);
+    }
+  }
+}
+
+// ---- 8. 查询规划器 --------------------------------------------------------
+const hasRetrievalEvents = await db.get(
+  `SELECT name FROM sqlite_master WHERE type='table' AND name='retrieval_events'`
+);
+if (hasRetrievalEvents) {
+  const rows = await db.all(
+    `SELECT plannerSource, COUNT(*) n,
+            SUM(CASE WHEN outcome = 'injected' THEN 1 ELSE 0 END) injected,
+            AVG(memoryNodeCount) nodes
+       FROM retrieval_events GROUP BY plannerSource ORDER BY n DESC`
+  );
+  const total = rows.reduce((s, r) => s + r.n, 0);
+  console.log("\n⑧ 查询规划器  —— smart 路径有没有被走过，走了有没有更好");
+  if (total === 0) {
+    line("检索次数", "0（埋点已就绪，尚未产生数据）");
+  } else {
+    for (const r of rows) {
+      line(
+        r.plannerSource,
+        `${r.n}  ${pct(r.n, total)}   注入率 ${pct(r.injected, r.n)}   均召回 ${(r.nodes ?? 0).toFixed(1)} 节点`
+      );
+    }
+    const fallbacks = await db.all(
+      `SELECT plannerError, COUNT(*) n FROM retrieval_events
+        WHERE plannerSource = 'fallback' GROUP BY plannerError ORDER BY n DESC LIMIT 3`
+    );
+    for (const f of fallbacks) {
+      line("  fallback 原因", `${String(f.plannerError).slice(0, 70)} ×${f.n}`);
+    }
+
+    // The funnel. A low injection rate has opposite fixes depending on which
+    // stage lost the candidates.
+    const funnel = await db.get(
+      `SELECT SUM(candidateCount) cand, SUM(selectedNodeCount) sel,
+              SUM(stitchedRelationCount) rel, SUM(summaryEvidenceCount) sum_
+         FROM retrieval_events WHERE candidateCount IS NOT NULL`
+    );
+    if (funnel?.cand != null) {
+      line("候选 → 选中", `${funnel.cand} → ${funnel.sel}  存活 ${pct(funnel.sel, funnel.cand)}`);
+      line("关系缝合贡献", `${funnel.rel ?? 0} 条边`);
+      line("摘要证据贡献", `${funnel.sum_ ?? 0} 条`);
+    }
+
+    const byIntent = await db.all(
+      `SELECT intent, COUNT(*) n,
+              SUM(CASE WHEN outcome = 'injected' THEN 1 ELSE 0 END) injected
+         FROM retrieval_events WHERE intent IS NOT NULL
+        GROUP BY intent ORDER BY n DESC`
+    );
+    for (const i of byIntent) {
+      line(`  intent ${i.intent}`, `${i.n} 次   注入率 ${pct(i.injected, i.n)}`);
+    }
+
+    const paths = await db.get(
+      `SELECT SUM(failureHits) f, SUM(decisionHits) d, SUM(messageHits) m
+         FROM retrieval_events WHERE failureHits IS NOT NULL`
+    );
+    if (paths && (paths.f || paths.d || paths.m)) {
+      const tot = (paths.f ?? 0) + (paths.d ?? 0) + (paths.m ?? 0);
+      line("路径归因 failure", `${paths.f ?? 0}  ${pct(paths.f ?? 0, tot)}`);
+      line("路径归因 decision", `${paths.d ?? 0}  ${pct(paths.d ?? 0, tot)}`);
+      line("路径归因 message", `${paths.m ?? 0}  ${pct(paths.m ?? 0, tot)}`);
+    }
+  }
+}
+
+// ---- 9. 压缩 --------------------------------------------------------------
+// Compression ratio is the value compaction claims to deliver; the fallback
+// rate is what silently takes it away. Both belong in the same view.
+const hasCompactionEvents = await db.get(
+  `SELECT name FROM sqlite_master WHERE type='table' AND name='compaction_events'`
+);
+if (hasCompactionEvents) {
+  const rows = await db.all(
+    `SELECT kind, llmOutcome, COUNT(*) n, AVG(latencyMs) ms,
+            SUM(inputChars) inChars, SUM(outputTokens) outTok, SUM(inputCount) inCount
+       FROM compaction_events GROUP BY kind, llmOutcome ORDER BY n DESC`
+  );
+  const total = rows.reduce((s, r) => s + r.n, 0);
+  console.log("\n⑨ 压缩  —— 摘要是模型写的还是降级截断的");
+  if (total === 0) {
+    line("压缩次数", "0（埋点已就绪，尚未产生数据）");
+  } else {
+    for (const r of rows) {
+      const ms = r.ms ? `  均 ${Math.round(r.ms)}ms` : "";
+      line(`${r.kind} / ${r.llmOutcome}`, `${r.n}  ${pct(r.n, total)}${ms}`);
+    }
+    const fb = await db.get(
+      `SELECT COUNT(*) n FROM compaction_events WHERE usedFallback = 1`
+    );
+    line("降级率", `${pct(fb?.n ?? 0, total)}  （降级 = 存的是原文片段，不是摘要）`);
+
+    const ratio = await db.get(
+      `SELECT SUM(inputChars) inChars, SUM(outputTokens) outTok
+         FROM compaction_events WHERE kind = 'leaf'`
+    );
+    if (ratio?.inChars) {
+      const inTok = Math.ceil(ratio.inChars / 4);
+      line("leaf 压缩比", `${inTok} → ${ratio.outTok} tokens  (${pct(ratio.outTok, inTok)})`);
+    }
+
+    const errs = await db.all(
+      `SELECT errorMessage, COUNT(*) n FROM compaction_events
+        WHERE errorMessage IS NOT NULL GROUP BY errorMessage ORDER BY n DESC LIMIT 3`
+    );
+    for (const e of errs) {
+      line("  降级原因", `${String(e.errorMessage).slice(0, 70)} ×${e.n}`);
+    }
+  }
+}
+
+// ---- 10. 写入侧 ------------------------------------------------------------
+// The drop rate is the filter's whole value proposition and its whole risk.
+// Too low and noise reaches storage; too high and the memory is missing the
+// thing you will look for later.
+const hasIngestionEvents = await db.get(
+  `SELECT name FROM sqlite_master WHERE type='table' AND name='ingestion_events'`
+);
+if (hasIngestionEvents) {
+  const rows = await db.all(
+    `SELECT tier, COUNT(*) n, SUM(rawChars) raw, SUM(storedChars) kept
+       FROM ingestion_events GROUP BY tier ORDER BY tier`
+  );
+  const total = rows.reduce((s, r) => s + r.n, 0);
+  console.log("\n⑩ 写入侧  —— 进来多少，留下多少");
+  if (total === 0) {
+    line("消息数", "0（埋点已就绪，尚未产生数据）");
+  } else {
+    for (const r of rows) {
+      line(`tier ${r.tier}`, `${r.n}  ${pct(r.n, total)}`);
+    }
+    const dropped = rows.find((r) => r.tier === "N")?.n ?? 0;
+    line("丢弃率", pct(dropped, total));
+
+    const raw = rows.reduce((s, r) => s + (r.raw ?? 0), 0);
+    const kept = rows.reduce((s, r) => s + (r.kept ?? 0), 0);
+    if (raw > 0) line("字符留存", `${raw} → ${kept}  ${pct(kept, raw)}`);
+
+    // Which rule did the discarding. A single tag dominating the drops is
+    // worth reading as either the filter working or one rule overreaching.
+    const dropRows = await db.all(
+      `SELECT tags FROM ingestion_events WHERE tier = 'N' AND tags IS NOT NULL`
+    );
+    const tagCounts = {};
+    for (const r of dropRows) {
+      try {
+        for (const t of JSON.parse(r.tags)) tagCounts[t] = (tagCounts[t] ?? 0) + 1;
+      } catch {
+        /* malformed tag blob */
+      }
+    }
+    for (const [tag, n] of Object.entries(tagCounts).sort((a, b) => b[1] - a[1]).slice(0, 5)) {
+      line(`  丢弃原因 ${tag}`, `${n}  ${pct(n, dropped)}`);
+    }
+
+    const sub = await db.get(
+      `SELECT COUNT(*) n FROM ingestion_events WHERE subagent = 1`
+    );
+    if (sub?.n) line("来自 subagent", `${sub.n}  ${pct(sub.n, total)}`);
+  }
+}
+
+// ---- 11. 关键记忆抽取 ------------------------------------------------------
+const hasExtractionEvents = await db.get(
+  `SELECT name FROM sqlite_master WHERE type='table' AND name='extraction_events'`
+);
+if (hasExtractionEvents) {
+  const rows = await db.all(
+    `SELECT outcome, COUNT(*) n, AVG(latencyMs) ms FROM extraction_events
+      GROUP BY outcome ORDER BY n DESC`
+  );
+  const total = rows.reduce((s, r) => s + r.n, 0);
+  console.log("\n⑪ 关键记忆抽取  —— 报出来的条数，是几个 chunk 换来的");
+  if (total === 0) {
+    line("chunk 调用", "0（埋点已就绪，尚未产生数据）");
+  } else {
+    for (const r of rows) {
+      const ms = r.ms ? `  均 ${Math.round(r.ms / 1000)}s` : "";
+      line(r.outcome, `${r.n}  ${pct(r.n, total)}${ms}`);
+    }
+    const runs = await db.all(
+      `SELECT runId, COUNT(*) chunks,
+              SUM(CASE WHEN outcome = 'ok' THEN 1 ELSE 0 END) okChunks,
+              SUM(itemCount) items, SUM(revisesCount) revises,
+              MAX(sourceRawChars) raw, MAX(sourceProseChars) prose
+         FROM extraction_events GROUP BY runId ORDER BY runId DESC LIMIT 5`
+    );
+    for (const r of runs) {
+      line(
+        `  ${r.runId}`,
+        `${r.okChunks}/${r.chunks} chunk 成功，产出 ${r.items} 条（含 ${r.revises} 条修订）`
+      );
+      if (r.raw) {
+        line("    prose 过滤", `${r.raw} → ${r.prose}  ${pct(r.prose, r.raw)}`);
+      }
+    }
+  }
+}
+
 await db.close();
 console.log("");

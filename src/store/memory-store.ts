@@ -1116,6 +1116,190 @@ export class MemoryNodeStore {
    * suppressed it", which is the difference between a recall problem and a
    * threshold problem.
    */
+  /**
+   * One row per message the scorer ruled on, including the N-tier ones it
+   * discarded. The drops are the point: they are written nowhere else, so
+   * without them the noise-rejection rate has no denominator.
+   */
+  async recordIngestion(input: {
+    conversationId?: number | null;
+    sessionId?: string | null;
+    messageId?: number | null;
+    role?: string | null;
+    tier: "S" | "M" | "L" | "N";
+    tags?: string[];
+    rawChars: number;
+    storedChars: number;
+    stored: boolean;
+    subagent?: boolean;
+  }): Promise<void> {
+    try {
+      await this.db.run(
+        `INSERT INTO ingestion_events (
+           conversationId, sessionId, messageId, role, tier, tags,
+           rawChars, storedChars, stored, subagent, createdAt
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          input.conversationId ?? null,
+          input.sessionId ?? null,
+          input.messageId ?? null,
+          input.role ?? null,
+          input.tier,
+          input.tags?.length ? JSON.stringify(input.tags) : null,
+          input.rawChars,
+          input.storedChars,
+          input.stored ? 1 : 0,
+          input.subagent ? 1 : 0,
+          new Date().toISOString(),
+        ]
+      );
+    } catch {
+      // Telemetry is never worth failing an ingest over.
+    }
+  }
+
+  /**
+   * One row per extraction chunk, which is one LLM call. Chunk failures are
+   * caught so a partial rebuild survives, which is correct and also means a
+   * run that reports twelve memories may have lost eight chunks in silence.
+   */
+  async recordExtraction(input: {
+    runId: string;
+    conversationId?: number | null;
+    sessionId?: string | null;
+    chunkIndex: number;
+    chunkCount: number;
+    chunkChars: number;
+    sourceRawChars?: number | null;
+    sourceProseChars?: number | null;
+    outcome: "ok" | "parse_empty" | "error";
+    itemCount: number;
+    decisionCount: number;
+    taskCount: number;
+    constraintCount: number;
+    revisesCount: number;
+    errorMessage?: string | null;
+    model?: string | null;
+    latencyMs?: number | null;
+  }): Promise<void> {
+    try {
+      await this.db.run(
+        `INSERT INTO extraction_events (
+           runId, conversationId, sessionId, chunkIndex, chunkCount, chunkChars,
+           sourceRawChars, sourceProseChars, outcome, itemCount, decisionCount,
+           taskCount, constraintCount, revisesCount, errorMessage, model,
+           latencyMs, createdAt
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          input.runId,
+          input.conversationId ?? null,
+          input.sessionId ?? null,
+          input.chunkIndex,
+          input.chunkCount,
+          input.chunkChars,
+          input.sourceRawChars ?? null,
+          input.sourceProseChars ?? null,
+          input.outcome,
+          input.itemCount,
+          input.decisionCount,
+          input.taskCount,
+          input.constraintCount,
+          input.revisesCount,
+          input.errorMessage ?? null,
+          input.model ?? null,
+          input.latencyMs ?? null,
+          new Date().toISOString(),
+        ]
+      );
+    } catch {
+      // Telemetry is never worth failing an extraction over.
+    }
+  }
+
+  /**
+   * One row per prompt that reached retrieval, including the ones that
+   * injected nothing. Without the empty ones a hit rate cannot be computed,
+   * and `plannerSource` is the only way to tell whether the optional LLM
+   * planner was ever actually taken.
+   */
+  async recordRetrieval(input: {
+    conversationId?: number | null;
+    sessionId?: string | null;
+    promptLength: number;
+    plannerSource: "fast" | "smart" | "fallback";
+    plannerAttempted: boolean;
+    plannerReason?: string | null;
+    plannerError?: string | null;
+    memoryNodeCount: number;
+    injectedChars: number;
+    latencyMs?: number | null;
+    /** Retrieval intent chosen by the plan, for per-intent breakdowns. */
+    intent?: string | null;
+    /** The funnel: how many nodes a tag matched, how many survived selection. */
+    candidateCount?: number | null;
+    selectedNodeCount?: number | null;
+    stitchedRelationCount?: number | null;
+    stitchedChainCount?: number | null;
+    summaryEvidenceCount?: number | null;
+    firstHopNodeCount?: number | null;
+    secondHopNodeCount?: number | null;
+    estimatedTokens?: number | null;
+    /** Which of the four retrieval paths actually produced surfaced content. */
+    queryCount?: number | null;
+    failureLookupCount?: number | null;
+    failureHits?: number | null;
+    decisionHits?: number | null;
+    messageHits?: number | null;
+    surfacedNodeIds?: string[];
+  }): Promise<void> {
+    try {
+      await this.db.run(
+        `INSERT INTO retrieval_events (
+           conversationId, sessionId, promptLength, plannerSource,
+           plannerAttempted, plannerReason, plannerError, memoryNodeCount,
+           injectedChars, outcome, latencyMs, intent,
+           candidateCount, selectedNodeCount, stitchedRelationCount,
+           stitchedChainCount, summaryEvidenceCount, firstHopNodeCount,
+           secondHopNodeCount, estimatedTokens, queryCount, failureLookupCount,
+           failureHits, decisionHits, messageHits, surfacedNodeIds, createdAt
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          input.conversationId ?? null,
+          input.sessionId ?? null,
+          input.promptLength,
+          input.plannerSource,
+          input.plannerAttempted ? 1 : 0,
+          input.plannerReason ?? null,
+          input.plannerError ?? null,
+          input.memoryNodeCount,
+          input.injectedChars,
+          input.injectedChars > 0 ? "injected" : "empty",
+          input.latencyMs ?? null,
+          input.intent ?? null,
+          input.candidateCount ?? null,
+          input.selectedNodeCount ?? null,
+          input.stitchedRelationCount ?? null,
+          input.stitchedChainCount ?? null,
+          input.summaryEvidenceCount ?? null,
+          input.firstHopNodeCount ?? null,
+          input.secondHopNodeCount ?? null,
+          input.estimatedTokens ?? null,
+          input.queryCount ?? null,
+          input.failureLookupCount ?? null,
+          input.failureHits ?? null,
+          input.decisionHits ?? null,
+          input.messageHits ?? null,
+          input.surfacedNodeIds?.length
+            ? JSON.stringify(input.surfacedNodeIds)
+            : null,
+          new Date().toISOString(),
+        ]
+      );
+    } catch {
+      // Telemetry is never worth failing a retrieval over.
+    }
+  }
+
   async recordFailureLookup(input: {
     conversationId?: number | null;
     sessionId?: string | null;
@@ -1260,8 +1444,17 @@ export class MemoryNodeStore {
         limit,
       })
     ).filter((c) => c.nodeId !== input.newNode.nodeId);
-    if (candidates.length === 0) return;
+    if (candidates.length === 0) {
+      await this.recordDecisionJudge({
+        newNode: input.newNode,
+        candidateCount: 0,
+        supersededNodeIds: [],
+        outcome: "no_candidates",
+      });
+      return;
+    }
 
+    const startedAt = Date.now();
     let outcomes;
     try {
       outcomes = await judge.judge({
@@ -1274,9 +1467,24 @@ export class MemoryNodeStore {
           content: c.content,
         })),
       });
-    } catch {
+    } catch (err) {
+      // Still swallowed: a judge failure must not fail the write that
+      // triggered it. But it is no longer invisible — an authentication
+      // failure or a timeout on every call used to look exactly like a judge
+      // that ran and agreed with everything.
+      await this.recordDecisionJudge({
+        newNode: input.newNode,
+        candidateCount: candidates.length,
+        supersededNodeIds: [],
+        outcome: "error",
+        errorMessage: err instanceof Error ? err.message : String(err),
+        latencyMs: Date.now() - startedAt,
+      });
       return;
     }
+    const latencyMs = Date.now() - startedAt;
+
+    const supersededNodeIds: string[] = [];
     for (const outcome of outcomes) {
       if (outcome.verdict !== "SUPERSEDED_BY_NEW") continue;
       await this.supersedeDecision({
@@ -1287,6 +1495,63 @@ export class MemoryNodeStore {
           : "auto-supersede via LLM judge",
         evidenceMessageId: input.evidenceMessageId,
       });
+      supersededNodeIds.push(outcome.nodeId);
+    }
+
+    // An empty verdict list means the model answered but nothing parsed, which
+    // is a prompt or model problem. A full list of KEEPs means it worked and
+    // was conservative. Same zero supersedes, different diagnosis.
+    await this.recordDecisionJudge({
+      newNode: input.newNode,
+      candidateCount: candidates.length,
+      supersededNodeIds,
+      outcome:
+        supersededNodeIds.length > 0
+          ? "superseded"
+          : outcomes.length === 0
+            ? "empty_verdict"
+            : "all_kept",
+      latencyMs,
+    });
+  }
+
+  private async recordDecisionJudge(input: {
+    newNode: MemoryNodeRecord;
+    candidateCount: number;
+    supersededNodeIds: string[];
+    outcome:
+      | "superseded"
+      | "all_kept"
+      | "no_candidates"
+      | "empty_verdict"
+      | "error";
+    errorMessage?: string;
+    latencyMs?: number;
+  }): Promise<void> {
+    try {
+      await this.db.run(
+        `INSERT INTO decision_judge_events (
+           conversationId, sessionId, newNodeId, candidateCount,
+           supersededCount, outcome, supersededNodeIds, errorMessage,
+           latencyMs, createdAt
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          input.newNode.conversationId ?? null,
+          input.newNode.sessionId ?? null,
+          input.newNode.nodeId,
+          input.candidateCount,
+          input.supersededNodeIds.length,
+          input.outcome,
+          input.supersededNodeIds.length
+            ? JSON.stringify(input.supersededNodeIds)
+            : null,
+          input.errorMessage ?? null,
+          input.latencyMs ?? null,
+          new Date().toISOString(),
+        ]
+      );
+    } catch {
+      // Telemetry is never worth failing a write over.
     }
   }
 

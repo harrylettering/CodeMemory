@@ -196,10 +196,43 @@ async function startDaemon(args) {
                         catch {
                             /* ignore — first prompt of a new session has no conv yet */
                         }
+                        const retrievalStartedAt = Date.now();
                         const result = await retrievalEngine.retrieveForPrompt({
                             prompt,
                             conversationId,
                         });
+                        try {
+                            await memoryStore.recordRetrieval({
+                                conversationId,
+                                sessionId,
+                                promptLength: prompt.length,
+                                plannerSource: result.planner?.source ?? "fast",
+                                plannerAttempted: result.planner?.attempted ?? false,
+                                plannerReason: result.planner?.reason ?? null,
+                                plannerError: result.planner?.error ?? null,
+                                memoryNodeCount: result.memoryNodes?.length ?? 0,
+                                injectedChars: result.markdown.length,
+                                latencyMs: Date.now() - retrievalStartedAt,
+                                intent: result.plan?.intent ?? null,
+                                candidateCount: result.metrics.memory.candidateCount,
+                                selectedNodeCount: result.metrics.memory.selectedNodeCount,
+                                stitchedRelationCount: result.metrics.memory.stitchedRelationCount,
+                                stitchedChainCount: result.metrics.memory.stitchedChainCount,
+                                summaryEvidenceCount: result.metrics.memory.summaryEvidenceCount,
+                                firstHopNodeCount: result.metrics.memory.firstHopNodeCount,
+                                secondHopNodeCount: result.metrics.memory.secondHopNodeCount,
+                                estimatedTokens: result.metrics.memory.estimatedTokens,
+                                queryCount: result.metrics.legacy.queryCount,
+                                failureLookupCount: result.metrics.legacy.failureLookupCount,
+                                failureHits: result.metrics.legacy.failureHits,
+                                decisionHits: result.metrics.legacy.decisionHits,
+                                messageHits: result.metrics.legacy.messageHits,
+                                surfacedNodeIds: result.memoryNodes?.map((n) => n.node.nodeId),
+                            });
+                        }
+                        catch (err) {
+                            logger.warn(`recordRetrieval failed: ${err}`);
+                        }
                         res.setHeader("content-type", "application/json");
                         res.end(JSON.stringify({
                             shouldInject: result.markdown.length > 0,
@@ -460,6 +493,28 @@ async function startDaemon(args) {
          * live; /reimport calls it again when rebuilding a session from its
          * jsonl, so both paths cannot drift apart.
          */
+        /**
+         * Size of the message as it arrived, before scoring compressed it. M and L
+         * tiers persist a metadata summary rather than the text, so comparing this
+         * against what was stored is the only way to see how much a tier actually
+         * saves.
+         */
+        const rawMessageChars = (message) => {
+            const parts = message.metadata?.parts;
+            if (parts?.length) {
+                let total = 0;
+                for (const part of parts) {
+                    try {
+                        total += JSON.stringify(part)?.length ?? 0;
+                    }
+                    catch {
+                        /* circular or unserializable part — skip it */
+                    }
+                }
+                return total;
+            }
+            return (message.content || "").length;
+        };
         const ingestOne = async (message, filePath) => {
             // Get or create conversation for this session
             // Prefer the id the entry carries over the one in the filename. They
@@ -493,7 +548,23 @@ async function startDaemon(args) {
                 catch (err) {
                     logger.warn(`flushExploredTargets failed: ${err}`);
                 }
+                const rawChars = rawMessageChars(message);
+                const isSubagent = filePath.includes(`${path.sep}subagents${path.sep}`);
                 if (score.tier === "N") {
+                    // Recorded before returning. A dropped message is written nowhere
+                    // else, so this row is the only evidence the scorer ever saw it —
+                    // and the only denominator for a noise-rejection rate.
+                    await memoryStore.recordIngestion({
+                        conversationId: conversation.conversationId,
+                        sessionId: fileSessionId,
+                        role: message.role ?? null,
+                        tier: "N",
+                        tags: score.tags,
+                        rawChars,
+                        storedChars: 0,
+                        stored: false,
+                        subagent: isSubagent,
+                    });
                     logger.debug(`Dropping ${message.role} message (N tier, tags=${score.tags.join(",")})`);
                     return;
                 }
@@ -510,6 +581,18 @@ async function startDaemon(args) {
                             partType: "text",
                             textContent: score.content,
                         }],
+                });
+                await memoryStore.recordIngestion({
+                    conversationId: conversation.conversationId,
+                    sessionId: fileSessionId,
+                    messageId: insertedMessage.messageId,
+                    role: message.role ?? null,
+                    tier: score.tier,
+                    tags: score.tags,
+                    rawChars,
+                    storedChars: (score.content || "").length,
+                    stored: true,
+                    subagent: isSubagent,
                 });
                 try {
                     await fixAttemptTracker.observeToolUses(message, {
@@ -714,9 +797,30 @@ async function startDaemon(args) {
             logger.info(`[reimport] extraction input is ${transcript.length} chars of prose, from a ${rawFileContent.length}-char transcript`);
             let extracted;
             try {
+                const runId = `extract-${conversationId}-${Date.now()}`;
                 extracted = await extractKeyMemories(transcript, {
                     model: config.compactionModel,
                     log: logger,
+                    onChunk: (r) => memoryStore.recordExtraction({
+                        runId,
+                        conversationId,
+                        sessionId: targetSessionId,
+                        chunkIndex: r.chunkIndex,
+                        chunkCount: r.chunkCount,
+                        chunkChars: r.chunkChars,
+                        sourceRawChars: rawFileContent.length,
+                        sourceProseChars: transcript.length,
+                        outcome: r.outcome,
+                        itemCount: r.items.length,
+                        decisionCount: r.items.filter((i) => i.kind === "decision").length,
+                        taskCount: r.items.filter((i) => i.kind === "task").length,
+                        constraintCount: r.items.filter((i) => i.kind === "constraint")
+                            .length,
+                        revisesCount: r.items.filter((i) => i.revises).length,
+                        errorMessage: r.errorMessage ?? null,
+                        model: r.model ?? null,
+                        latencyMs: r.latencyMs,
+                    }),
                 });
             }
             catch (err) {
