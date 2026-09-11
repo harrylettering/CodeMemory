@@ -20,6 +20,9 @@
 import { spawn } from "node:child_process";
 import { buildClaudeCliArgs, claudeCliSpawnEnv, describeClaudeCliFailure, } from "../llm/claude-cli.js";
 import { createMemoryNodeStore } from "../store/memory-store.js";
+/** Distinguishes "the model answered badly twice" from "the call failed". */
+class ValidationExhaustedError extends Error {
+}
 /**
  * Marker prepended to fallback "summaries" so readers see immediately that
  * the stored content is verbatim fragments, not an LLM-produced summary.
@@ -326,7 +329,7 @@ export class AsyncCompactor {
             SUMMARY_METADATA_INSTRUCTION +
             "\n\n" +
             combined;
-        const { content: summaryText, metadata: summaryMetadata } = await this.callLlmOrTruncate(prompt, combined, {
+        const { content: summaryText, metadata: summaryMetadata, telemetry, } = await this.callLlmOrTruncate(prompt, combined, {
             kind: "condensed",
             targetTokens: this.config.condensedTargetTokens,
         });
@@ -355,6 +358,15 @@ export class AsyncCompactor {
             tokenCount,
             createdAt: new Date().toISOString(),
         }, summaryMetadata);
+        await this.recordCompactionEvent({
+            conversationId,
+            kind: "condensed",
+            summaryId,
+            inputCount: leaves.length,
+            inputChars: combined.length,
+            outputTokens: tokenCount,
+            telemetry,
+        });
         this.logger.debug(`[compactor] created condensed ${summaryId} covering ${leaves.length} leaves (${tokenCount} tokens)`);
         return summaryId;
     }
@@ -379,7 +391,7 @@ export class AsyncCompactor {
         const combined = messages
             .map((m) => `[${m.role.toUpperCase()}] ${m.content}`)
             .join("\n\n");
-        const { text: summaryText, metadata: summaryMetadata } = await this.summarize(combined);
+        const { text: summaryText, metadata: summaryMetadata, telemetry, inputChars, } = await this.summarize(combined);
         const summaryId = `leaf-${conversationId}-${Date.now()}-${Math.random()
             .toString(36)
             .slice(2, 8)}`;
@@ -404,6 +416,15 @@ export class AsyncCompactor {
             tokenCount,
             createdAt: new Date().toISOString(),
         }, summaryMetadata);
+        await this.recordCompactionEvent({
+            conversationId,
+            kind: "leaf",
+            summaryId,
+            inputCount: messages.length,
+            inputChars,
+            outputTokens: tokenCount,
+            telemetry,
+        });
         this.logger.debug(`[compactor] created summary ${summaryId} covering ${messages.length} messages (${tokenCount} tokens)`);
         return summaryId;
     }
@@ -424,7 +445,12 @@ export class AsyncCompactor {
             kind: "leaf",
             targetTokens: this.config.leafTargetTokens,
         });
-        return { text: result.content, metadata: result.metadata };
+        return {
+            text: result.content,
+            metadata: result.metadata,
+            telemetry: result.telemetry,
+            inputChars: safeContent.length,
+        };
     }
     async createSummaryMemoryNode(summary, metadata) {
         if (!this.shouldCreateSummaryAnchor(summary.content, metadata)) {
@@ -453,15 +479,58 @@ export class AsyncCompactor {
      * metadata the LLM emitted as a JSON header. Truncation fallbacks have
      * `metadata: null` so callers fall back to regex-based anchor detection.
      */
+    /**
+     * Single writer for compaction_events, alongside the summaries write it
+     * describes. A summary row cannot say whether the model produced it, how
+     * long it took, or why it fell back — and the fallback marker in the text
+     * only survives while the text does.
+     */
+    async recordCompactionEvent(input) {
+        try {
+            await this.db.run(`INSERT INTO compaction_events (
+           conversationId, kind, trigger, summaryId, inputCount, inputChars,
+           outputTokens, llmOutcome, usedFallback, errorMessage, model,
+           latencyMs, createdAt
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, [
+                input.conversationId,
+                input.kind,
+                input.trigger ?? "background",
+                input.summaryId,
+                input.inputCount,
+                input.inputChars,
+                input.outputTokens,
+                input.telemetry.llmOutcome,
+                input.telemetry.usedFallback ? 1 : 0,
+                input.telemetry.errorMessage ?? null,
+                input.telemetry.model ?? null,
+                input.telemetry.latencyMs,
+                new Date().toISOString(),
+            ]);
+        }
+        catch (err) {
+            this.logger.debug(`[compactor] compaction telemetry write failed: ${err}`);
+        }
+    }
     async callLlmOrTruncate(prompt, fallbackContent, options) {
+        const startedAt = Date.now();
+        const model = this.config.compactionModel;
         if (!this.config.compactionDisableLlm) {
             try {
-                const args = buildClaudeCliArgs(this.config.compactionModel);
+                const args = buildClaudeCliArgs(model);
                 const raw = await spawnWithStdin("claude", args, prompt, 30_000);
                 const firstParsed = parseSummaryWithMetadata(raw);
                 const firstCheck = this.validateSummaryQuality(firstParsed.content, fallbackContent, options);
                 if (firstCheck.ok) {
-                    return { content: firstParsed.content, metadata: firstParsed.metadata };
+                    return {
+                        content: firstParsed.content,
+                        metadata: firstParsed.metadata,
+                        telemetry: {
+                            llmOutcome: "ok",
+                            usedFallback: false,
+                            model,
+                            latencyMs: Date.now() - startedAt,
+                        },
+                    };
                 }
                 this.logger.warn(`[compactor] ${options.kind} summary failed validation (${firstCheck.reason}, ${firstCheck.tokenCount}/${firstCheck.maxTokens} tokens); retrying once`);
                 const retryPrompt = this.buildSummaryRetryPrompt(prompt, raw, firstCheck, options);
@@ -469,17 +538,46 @@ export class AsyncCompactor {
                 const retryParsed = parseSummaryWithMetadata(retryRaw);
                 const retryCheck = this.validateSummaryQuality(retryParsed.content, fallbackContent, options);
                 if (retryCheck.ok) {
-                    return { content: retryParsed.content, metadata: retryParsed.metadata };
+                    return {
+                        content: retryParsed.content,
+                        metadata: retryParsed.metadata,
+                        telemetry: {
+                            llmOutcome: "ok_after_retry",
+                            usedFallback: false,
+                            model,
+                            latencyMs: Date.now() - startedAt,
+                        },
+                    };
                 }
-                throw new Error(`summary validation failed after retry: ${retryCheck.reason} (${retryCheck.tokenCount}/${retryCheck.maxTokens} tokens)`);
+                throw new ValidationExhaustedError(`summary validation failed after retry: ${retryCheck.reason} (${retryCheck.tokenCount}/${retryCheck.maxTokens} tokens)`);
             }
             catch (err) {
                 this.logger.warn(`[compactor] claude --print summarization failed, using truncation fallback: ${err}`);
+                return {
+                    content: this.createTruncationFallback(fallbackContent, options),
+                    metadata: null,
+                    telemetry: {
+                        // A summary rejected twice on quality and a CLI that never ran are
+                        // both fallbacks, but only one of them is an outage.
+                        llmOutcome: err instanceof ValidationExhaustedError
+                            ? "validation_failed"
+                            : "error",
+                        usedFallback: true,
+                        errorMessage: err instanceof Error ? err.message : String(err),
+                        model,
+                        latencyMs: Date.now() - startedAt,
+                    },
+                };
             }
         }
         return {
             content: this.createTruncationFallback(fallbackContent, options),
             metadata: null,
+            telemetry: {
+                llmOutcome: "disabled",
+                usedFallback: true,
+                latencyMs: Date.now() - startedAt,
+            },
         };
     }
     validateSummaryQuality(summary, source, options) {

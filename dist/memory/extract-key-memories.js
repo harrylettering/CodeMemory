@@ -118,8 +118,17 @@ export async function extractKeyMemories(transcript, options = {}) {
     if (chunks.length === 0)
         return [];
     options.log?.info(`[reimport] extracting key memories from ${chunks.length} chunk(s)`);
+    const report = async (r) => {
+        try {
+            await options.onChunk?.(r);
+        }
+        catch {
+            // Reporting must not break extraction.
+        }
+    };
     const collected = [];
     for (let i = 0; i < chunks.length; i++) {
+        const chunkStartedAt = Date.now();
         try {
             // Carry what earlier chunks produced into this one. Without it a
             // revision can only ever be spotted inside a single excerpt, and a
@@ -129,14 +138,39 @@ export async function extractKeyMemories(transcript, options = {}) {
                 ? `\n\n--- already extracted from earlier excerpts (set "revises" to one of these statements if this excerpt replaces it) ---\n` +
                     collected.map((m) => `- [${m.kind}] ${m.statement}`).join("\n")
                 : "";
-            const raw = await runClaude(`<transcript_excerpt part="${i + 1}/${chunks.length}">\n${chunks[i]}\n</transcript_excerpt>\n\n` +
-                `${PROMPT}${priorContext}`, options);
-            collected.push(...parseItems(raw));
+            const chunkPrompt = `<transcript_excerpt part="${i + 1}/${chunks.length}">\n${chunks[i]}\n</transcript_excerpt>\n\n` +
+                `${PROMPT}${priorContext}`;
+            const raw = options.runCompletion
+                ? await options.runCompletion(chunkPrompt)
+                : await runClaude(chunkPrompt, options);
+            const items = parseItems(raw);
+            collected.push(...items);
+            await report({
+                chunkIndex: i,
+                chunkCount: chunks.length,
+                chunkChars: chunks[i].length,
+                // The model answered but nothing parsed. That is a prompt or format
+                // problem, not an outage, and it needs the opposite investigation.
+                outcome: items.length > 0 ? "ok" : "parse_empty",
+                items,
+                model: options.model,
+                latencyMs: Date.now() - chunkStartedAt,
+            });
         }
         catch (error) {
             // One bad chunk must not discard the rest: a partial rebuild of these
             // nodes is better than none, and the failure is visible in the log.
             options.log?.warn(`[reimport] key-memory extraction failed on chunk ${i + 1}/${chunks.length}: ${error}`);
+            await report({
+                chunkIndex: i,
+                chunkCount: chunks.length,
+                chunkChars: chunks[i].length,
+                outcome: "error",
+                items: [],
+                errorMessage: error instanceof Error ? error.message : String(error),
+                model: options.model,
+                latencyMs: Date.now() - chunkStartedAt,
+            });
         }
     }
     return dedupe(collected);

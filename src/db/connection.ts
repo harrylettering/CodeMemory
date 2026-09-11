@@ -606,6 +606,227 @@ export async function runCodeMemoryMigrations(db: any): Promise<void> {
     )
   `);
 
+  // Migration 27: Telemetry for the two LLM-backed features that were opt-in
+  // but unobservable. Both were switched on in settings and neither could be
+  // shown to have ever run.
+  //
+  // The decision judge left a trace only when it ruled SUPERSEDED_BY_NEW, and
+  // its call site swallowed every error with a bare catch, so "never fired",
+  // "fired and correctly kept everything", and "failed on every invocation"
+  // were indistinguishable from outside. They need opposite fixes.
+  //
+  // The query planner computed a source/reason pair and returned it in the
+  // response, where it was discarded. A row per prompt makes it answerable
+  // whether the smart path was ever taken and whether it retrieved more than
+  // the deterministic plan it replaced.
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS decision_judge_events (
+      eventId INTEGER PRIMARY KEY AUTOINCREMENT,
+      conversationId INTEGER,
+      sessionId TEXT,
+      newNodeId TEXT NOT NULL,
+      candidateCount INTEGER NOT NULL DEFAULT 0,
+      supersededCount INTEGER NOT NULL DEFAULT 0,
+      outcome TEXT NOT NULL CHECK(outcome IN (
+        'superseded', 'all_kept', 'no_candidates', 'empty_verdict', 'error'
+      )),
+      supersededNodeIds TEXT,
+      errorMessage TEXT,
+      latencyMs INTEGER,
+      createdAt TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+
+  await db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_decision_judge_events_outcome ON decision_judge_events(
+      outcome, createdAt
+    )
+  `);
+
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS retrieval_events (
+      eventId INTEGER PRIMARY KEY AUTOINCREMENT,
+      conversationId INTEGER,
+      sessionId TEXT,
+      promptLength INTEGER NOT NULL DEFAULT 0,
+      -- 'fallback' is the planner having been attempted and thrown. It looks
+      -- like 'fast' in the retrieved result but means the opposite: the fast
+      -- plan was judged insufficient and the replacement failed.
+      plannerSource TEXT NOT NULL CHECK(plannerSource IN ('fast', 'smart', 'fallback')),
+      plannerAttempted INTEGER NOT NULL DEFAULT 0,
+      plannerReason TEXT,
+      plannerError TEXT,
+      memoryNodeCount INTEGER NOT NULL DEFAULT 0,
+      injectedChars INTEGER NOT NULL DEFAULT 0,
+      outcome TEXT NOT NULL CHECK(outcome IN ('injected', 'empty')),
+      latencyMs INTEGER,
+      createdAt TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+
+  await db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_retrieval_events_planner ON retrieval_events(
+      plannerSource, createdAt
+    )
+  `);
+
+  // Migration 28: Round out the two telemetry surfaces so the system can be
+  // evaluated rather than described.
+  //
+  // Retrieval already computed a full funnel on every call — how many nodes
+  // matched a tag, how many survived selection, what relation stitching added,
+  // which of the four paths produced the surfaced content — and returned it in
+  // the response, where it was dropped. Storing only the final count answers
+  // "did anything come back" and nothing about why. A low injection rate has
+  // opposite fixes depending on whether candidates were never found or found
+  // and then filtered away.
+  //
+  // Compaction had no durable record at all. Whether a summary came from the
+  // model or from the truncation fallback survived only as a marker embedded
+  // in the summary text, and the reason for a fallback — quota exhausted,
+  // timeout, validation failure after retry — existed only as an untimestamped
+  // log line. 224 fallbacks were logged against 0 recoverable in the database.
+  for (const [column, type] of [
+    ["candidateCount", "INTEGER"],
+    ["selectedNodeCount", "INTEGER"],
+    ["stitchedRelationCount", "INTEGER"],
+    ["stitchedChainCount", "INTEGER"],
+    ["summaryEvidenceCount", "INTEGER"],
+    ["firstHopNodeCount", "INTEGER"],
+    ["secondHopNodeCount", "INTEGER"],
+    ["estimatedTokens", "INTEGER"],
+    ["queryCount", "INTEGER"],
+    ["failureLookupCount", "INTEGER"],
+    ["failureHits", "INTEGER"],
+    ["decisionHits", "INTEGER"],
+    ["messageHits", "INTEGER"],
+    ["intent", "TEXT"],
+    // Joinable back to memory_nodes, which is what makes "was the surfaced
+    // memory any good" answerable after the fact.
+    ["surfacedNodeIds", "TEXT"],
+  ] as const) {
+    await addColumnIfMissing(db, "retrieval_events", column, type);
+  }
+
+  await db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_retrieval_events_intent ON retrieval_events(
+      intent, createdAt
+    )
+  `);
+
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS compaction_events (
+      eventId INTEGER PRIMARY KEY AUTOINCREMENT,
+      conversationId INTEGER,
+      sessionId TEXT,
+      kind TEXT NOT NULL CHECK(kind IN ('leaf', 'condensed')),
+      trigger TEXT NOT NULL DEFAULT 'background',
+      summaryId TEXT,
+      inputCount INTEGER NOT NULL DEFAULT 0,
+      inputChars INTEGER NOT NULL DEFAULT 0,
+      outputTokens INTEGER NOT NULL DEFAULT 0,
+      -- 'ok' first try, 'ok_after_retry' the quality retry saved it,
+      -- 'validation_failed' both attempts were rejected, 'error' the CLI
+      -- itself failed, 'disabled' the LLM was switched off by config.
+      llmOutcome TEXT NOT NULL CHECK(llmOutcome IN (
+        'ok', 'ok_after_retry', 'validation_failed', 'error', 'disabled'
+      )),
+      usedFallback INTEGER NOT NULL DEFAULT 0,
+      errorMessage TEXT,
+      model TEXT,
+      latencyMs INTEGER,
+      createdAt TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+
+  await db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_compaction_events_outcome ON compaction_events(
+      llmOutcome, createdAt
+    )
+  `);
+
+  await db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_compaction_events_conversation ON compaction_events(
+      conversationId, createdAt
+    )
+  `);
+
+  // Migration 29: The write side. Retrieval and compaction were observable
+  // after migrations 26-28; what entered the system was not.
+  //
+  // N-tier messages are dropped by the scorer and never written anywhere, so
+  // the single most important ingestion number — what fraction of a session is
+  // discarded as noise, and under which rule — had no record at all. The
+  // stored tiers are recoverable from conversation_messages, but a rate needs
+  // its denominator, and the denominator was exactly the part being thrown
+  // away.
+  //
+  // Key-memory extraction runs one LLM call per transcript chunk and catches
+  // per-chunk failures so a partial rebuild survives. That is the right
+  // behavior and it means a run reporting 12 memories may have silently lost
+  // eight chunks.
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS ingestion_events (
+      eventId INTEGER PRIMARY KEY AUTOINCREMENT,
+      conversationId INTEGER,
+      sessionId TEXT,
+      messageId INTEGER,
+      role TEXT,
+      tier TEXT NOT NULL CHECK(tier IN ('S', 'M', 'L', 'N')),
+      tags TEXT,
+      rawChars INTEGER NOT NULL DEFAULT 0,
+      storedChars INTEGER NOT NULL DEFAULT 0,
+      stored INTEGER NOT NULL DEFAULT 0,
+      subagent INTEGER NOT NULL DEFAULT 0,
+      createdAt TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+
+  await db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_ingestion_events_tier ON ingestion_events(
+      tier, createdAt
+    )
+  `);
+
+  await db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_ingestion_events_conversation ON ingestion_events(
+      conversationId, createdAt
+    )
+  `);
+
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS extraction_events (
+      eventId INTEGER PRIMARY KEY AUTOINCREMENT,
+      runId TEXT NOT NULL,
+      conversationId INTEGER,
+      sessionId TEXT,
+      chunkIndex INTEGER NOT NULL DEFAULT 0,
+      chunkCount INTEGER NOT NULL DEFAULT 0,
+      chunkChars INTEGER NOT NULL DEFAULT 0,
+      -- Whole-run figures, repeated on each chunk so one row is self-contained.
+      -- The prose filter drops tool traffic; the ratio between these two is how
+      -- much of a transcript the model never has to read.
+      sourceRawChars INTEGER,
+      sourceProseChars INTEGER,
+      outcome TEXT NOT NULL CHECK(outcome IN ('ok', 'parse_empty', 'error')),
+      itemCount INTEGER NOT NULL DEFAULT 0,
+      decisionCount INTEGER NOT NULL DEFAULT 0,
+      taskCount INTEGER NOT NULL DEFAULT 0,
+      constraintCount INTEGER NOT NULL DEFAULT 0,
+      revisesCount INTEGER NOT NULL DEFAULT 0,
+      errorMessage TEXT,
+      model TEXT,
+      latencyMs INTEGER,
+      createdAt TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+
+  await db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_extraction_events_run ON extraction_events(
+      runId, chunkIndex
+    )
+  `);
+
   console.log(`[codememory] Database migrations completed successfully`);
 }
 

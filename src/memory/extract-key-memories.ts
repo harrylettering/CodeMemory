@@ -45,6 +45,29 @@ export interface ExtractKeyMemoriesOptions {
   /** Upper bound on calls, so a huge transcript cannot run unbounded. */
   maxChunks?: number;
   log?: { info: (m: string) => void; warn: (m: string) => void };
+  /**
+   * Completion seam. Defaults to spawning `claude --print`; the decision
+   * judge exposes the same hook, and without it neither the chunk-failure
+   * path nor the unparseable-answer path can be exercised without a live CLI.
+   */
+  runCompletion?: (prompt: string) => Promise<string>;
+  /**
+   * Called once per chunk, after the call settles. Chunk failures are caught
+   * here so a partial rebuild survives, which means a run reporting twelve
+   * memories may have lost eight chunks without the caller ever knowing.
+   */
+  onChunk?: (report: ExtractionChunkReport) => void | Promise<void>;
+}
+
+export interface ExtractionChunkReport {
+  chunkIndex: number;
+  chunkCount: number;
+  chunkChars: number;
+  outcome: "ok" | "parse_empty" | "error";
+  items: ExtractedKeyMemory[];
+  errorMessage?: string;
+  model?: string;
+  latencyMs: number;
 }
 
 const DEFAULT_CHUNK_CHARS = 24_000;
@@ -166,8 +189,17 @@ export async function extractKeyMemories(
     `[reimport] extracting key memories from ${chunks.length} chunk(s)`
   );
 
+  const report = async (r: ExtractionChunkReport) => {
+    try {
+      await options.onChunk?.(r);
+    } catch {
+      // Reporting must not break extraction.
+    }
+  };
+
   const collected: ExtractedKeyMemory[] = [];
   for (let i = 0; i < chunks.length; i++) {
+    const chunkStartedAt = Date.now();
     try {
       // Carry what earlier chunks produced into this one. Without it a
       // revision can only ever be spotted inside a single excerpt, and a
@@ -179,18 +211,41 @@ export async function extractKeyMemories(
             collected.map((m) => `- [${m.kind}] ${m.statement}`).join("\n")
           : "";
 
-      const raw = await runClaude(
+      const chunkPrompt =
         `<transcript_excerpt part="${i + 1}/${chunks.length}">\n${chunks[i]}\n</transcript_excerpt>\n\n` +
-          `${PROMPT}${priorContext}`,
-        options
-      );
-      collected.push(...parseItems(raw));
+        `${PROMPT}${priorContext}`;
+      const raw = options.runCompletion
+        ? await options.runCompletion(chunkPrompt)
+        : await runClaude(chunkPrompt, options);
+      const items = parseItems(raw);
+      collected.push(...items);
+      await report({
+        chunkIndex: i,
+        chunkCount: chunks.length,
+        chunkChars: chunks[i].length,
+        // The model answered but nothing parsed. That is a prompt or format
+        // problem, not an outage, and it needs the opposite investigation.
+        outcome: items.length > 0 ? "ok" : "parse_empty",
+        items,
+        model: options.model,
+        latencyMs: Date.now() - chunkStartedAt,
+      });
     } catch (error) {
       // One bad chunk must not discard the rest: a partial rebuild of these
       // nodes is better than none, and the failure is visible in the log.
       options.log?.warn(
         `[reimport] key-memory extraction failed on chunk ${i + 1}/${chunks.length}: ${error}`
       );
+      await report({
+        chunkIndex: i,
+        chunkCount: chunks.length,
+        chunkChars: chunks[i].length,
+        outcome: "error",
+        items: [],
+        errorMessage: error instanceof Error ? error.message : String(error),
+        model: options.model,
+        latencyMs: Date.now() - chunkStartedAt,
+      });
     }
   }
 
