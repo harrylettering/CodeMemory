@@ -558,8 +558,14 @@ async function startDaemon(args: string[]) {
       filePath: string
     ): Promise<void> => {
       // Get or create conversation for this session
+      // Prefer the id the entry carries over the one in the filename. They
+      // agree for a normal transcript, but a subagent's file is named
+      // `agent-<agentId>.jsonl` while every entry inside it carries the
+      // *parent* session id — which is the right owner. A subagent's work
+      // is part of the session that dispatched it, not a session of its own.
       const fileName = path.basename(filePath, ".jsonl");
-      const fileSessionId = fileName || sessionId;
+      const fileSessionId =
+        message.metadata?.sessionId || fileName || sessionId;
 
       try {
         // Extract phase: observe every message for mutation tracking
@@ -692,7 +698,16 @@ async function startDaemon(args: string[]) {
         // memory_node (kind='failure'). Then check whether a prior
         // failure with the same anchors should be reopened.
         const failureNodeIds: string[] = [];
-        if (score.tags.includes("error")) {
+        // Both tags mean "this tool call failed". `error` comes from an
+        // explicit is_error; `error_inferred` from recognizing the failure in
+        // the output when the exit code was swallowed — by a shell chain, a
+        // pipe, or a wrapper that exits 0. Accepting only the first meant a
+        // `cd dir && tsc --noEmit` that printed TS2322 was stored as a
+        // first-class error message and then produced no failure node at all.
+        if (
+          score.tags.includes("error") ||
+          score.tags.includes("error_inferred")
+        ) {
           const extracted = extractor.extractFromErrorMessage(
             message,
             conversation.conversationId,
@@ -935,6 +950,32 @@ async function startDaemon(args: string[]) {
     };
 
     /**
+     * Every transcript belonging to a session: its own, plus each subagent it
+     * dispatched. Subagent turns live in `<sessionId>/subagents/agent-*.jsonl`
+     * rather than the parent file, so reading only the parent would rebuild a
+     * session with the delegated work missing — under a plan-and-delegate
+     * workflow, that is most of it.
+     */
+    const transcriptsForSession = (
+      watchDirectory: string,
+      targetSessionId: string
+    ): string[] => {
+      const main = path.join(watchDirectory, `${targetSessionId}.jsonl`);
+      const files = fs.existsSync(main) ? [main] : [];
+
+      const subagentDir = path.join(watchDirectory, targetSessionId, "subagents");
+      try {
+        for (const name of fs.readdirSync(subagentDir).sort()) {
+          if (!name.endsWith(".jsonl")) continue;
+          files.push(path.join(subagentDir, name));
+        }
+      } catch {
+        // No subagents for this session.
+      }
+      return files;
+    };
+
+    /**
      * Rebuild one session from its transcript: drop what is stored, replay
      * every line through the same ingest path the watcher uses, then recover
      * the memory kinds that deterministic rules cannot produce.
@@ -960,14 +1001,26 @@ async function startDaemon(args: string[]) {
       extractors.delete(targetSessionId);
       scorerStates.delete(targetSessionId);
 
-      const messages = await watcher.readAllMessages(filePath);
-      for (const message of messages) {
-        await ingestOne(message, filePath);
-      }
+      const transcripts = transcriptsForSession(
+        watcher.watchDirectory,
+        targetSessionId
+      );
+      logger.info(
+        `[reimport] replaying ${transcripts.length} transcript(s) for ${targetSessionId}`
+      );
 
-      // The replayed file is now fully consumed; keep the live watcher from
-      // treating it as a backlog on the next poll.
-      await watcher.markFileConsumed(filePath);
+      let messageCount = 0;
+      for (const transcript of transcripts) {
+        const messages = await watcher.readAllMessages(transcript);
+        messageCount += messages.length;
+        for (const message of messages) {
+          await ingestOne(message, transcript);
+        }
+        // Fully consumed now; keep the live watcher from treating it as a
+        // backlog on the next poll.
+        await watcher.markFileConsumed(transcript);
+      }
+      const messages = { length: messageCount };
 
       const rebuilt = await conversationStore.getConversationForSession({
         sessionId: targetSessionId,
@@ -978,10 +1031,19 @@ async function startDaemon(args: string[]) {
       // have no rule that produces them, so read them back with the model.
       let keyMemories = { decision: 0, task: 0, constraint: 0, superseded: 0, skipped: false };
       if (rebuilt && !config.compactionDisableLlm) {
+        // Concatenate every transcript so a decision made inside a subagent is
+        // visible to the extraction pass, not just the summary it returned.
+        const combined = (
+          await Promise.all(
+            transcripts.map((t) =>
+              fs.promises.readFile(t, "utf-8").catch(() => "")
+            )
+          )
+        ).join("\n");
         keyMemories = await rebuildKeyMemories(
           rebuilt.conversationId,
           targetSessionId,
-          await fs.promises.readFile(filePath, "utf-8")
+          combined
         );
       } else if (rebuilt) {
         keyMemories.skipped = true;

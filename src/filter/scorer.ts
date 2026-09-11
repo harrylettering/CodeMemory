@@ -157,18 +157,31 @@ export function scoreMessage(
   state: ScorerSessionState,
   options: ScoreOptions = {}
 ): ScoreResult {
-  // Sidechain (subagent internal turns) are pure noise from the parent
-  // session's perspective. Only the final assistant return inside the
-  // parent session matters.
-  if (msg.metadata?.isSidechain) {
-    return { tier: "N", tags: ["sidechain"], content: "" };
-  }
-
-  return applyCodingRules(msg, state, {
+  // Subagent turns used to be dropped wholesale here, on the grounds that only
+  // the final return matters to the parent. That is true of the *conversation*
+  // and false of the engineering record: a subagent runs the commands, edits
+  // the files and hits the errors, and none of that reaches the parent
+  // transcript — only its closing summary does. Under a plan-and-delegate
+  // workflow it is where nearly all the recoverable memory lives.
+  //
+  // Measured on a subagent asked to fix a type error and report one sentence:
+  // it hit TS2322 across four Bash calls, and the parent transcript contained
+  // no trace of it. Dropping these is how that failure became unrecordable.
+  //
+  // The ordinary rules already demote low-value turns — exploration lands in L
+  // and decays to N on repeat — so the blanket rule was suppression stacked on
+  // top of suppression that works. Tag the origin instead of discarding it, so
+  // a subagent's rows stay distinguishable without being lost.
+  const scored = applyCodingRules(msg, state, {
     nowMs: options.nowMs ?? Date.now(),
     exploredTargetWindowMs:
       options.exploredTargetWindowMs ?? DEFAULT_EXPLORED_TARGET_WINDOW_MS,
   });
+
+  if (msg.metadata?.isSidechain && scored.tier !== "N") {
+    return { ...scored, tags: [...scored.tags, "sidechain"] };
+  }
+  return scored;
 }
 
 /**

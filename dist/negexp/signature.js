@@ -21,8 +21,98 @@ const LINE_NUMBER_PATTERNS = [
     { re: /\bat\s+<path>:\d+/g, replace: " at <path>" },
     { re: /:\d+(?=:|$)/g, replace: "" }, // standalone :123 suffixes
 ];
+/**
+ * Lines that carry the failure itself, as opposed to whatever the command
+ * printed around it.
+ *
+ * Deliberately narrower than the scorer's detection patterns: those decide
+ * *whether* output contains a failure, which can afford to be generous. This
+ * decides *which line is the failure*, and a generous match here pollutes the
+ * signature that the whole anchor-matching scheme depends on.
+ */
+const SIGNATURE_LINE_PATTERNS = [
+    /\bTS\d{4}\b/,
+    /\b(SyntaxError|TypeError|ReferenceError|NameError|AttributeError|KeyError|ValueError|IndexError|RuntimeError|FileNotFoundError|PermissionError|ModuleNotFoundError|ImportError|ZeroDivisionError)\b/,
+    /\berror\b[:\s]/i,
+    /\bfatal\b[:\s]/i,
+    /Cannot find module/i,
+    /Cannot read propert/i,
+    /is not a function/,
+    /is not defined/,
+    /\b(ENOENT|EACCES|EPERM|ECONNREFUSED|ETIMEDOUT|EADDRINUSE)\b/,
+    /^npm ERR!/m,
+    /^panic:/m,
+    /Traceback \(most recent call last\)/,
+    /^\s*at .+\(.+:\d+:\d+\)/m,
+    /command not found/i,
+    /no such file or directory/i,
+    /permission denied/i,
+];
+/** Says a command failed, not how — usable only alongside something else. */
+const EXIT_CODE_PATTERN = /\bexit code\s+[^0]/i;
+/** A signature past this length has stopped being a fingerprint. */
+const MAX_SIGNATURE_CHARS = 200;
+/**
+ * Reduce a raw tool result to the lines that actually describe the failure.
+ *
+ * Without this, `normalizeError` fingerprints the entire output — a `cd &&
+ * tsc` whose result also contained a directory listing produced a 300-plus
+ * character signature beginning with `total 16 drwxr-xr-x@ ...`. Two runs of
+ * the same failure never produce identical surrounding output, so such a
+ * signature can never match a second occurrence, and signature-anchored recall
+ * silently degrades to nothing. Measured on a real database: median signature
+ * length 330 characters, only 32% short enough to be reusable.
+ *
+ * Falls back to the head of the input when nothing matches, so an unrecognized
+ * failure still yields something bounded rather than the whole payload.
+ */
+export function extractErrorLines(raw, maxLines = 3) {
+    const lines = raw.split("\n").filter((l) => l.trim());
+    const matched = [];
+    for (const line of lines) {
+        if (SIGNATURE_LINE_PATTERNS.some((re) => re.test(line))) {
+            matched.push(line.trim());
+            if (matched.length >= maxLines)
+                break;
+        }
+    }
+    if (matched.length > 0)
+        return matched.join(" ");
+    // Nothing recognizable. `Exit code 1` says a command failed and nothing
+    // about how, so building a signature out of it plus whatever happened to
+    // print nearby collapses unrelated failures onto one key — measured on a
+    // real database, three different failures shared a signature that way.
+    //
+    // That is worse than an over-long signature. Over-long fails to match;
+    // identical matches the wrong thing, and a false prior-failure warning
+    // costs more trust than a missing one. Return the head, bounded, and let
+    // the caller decide whether it is worth anchoring on.
+    return lines.slice(0, maxLines).join(" ");
+}
+/**
+ * Whether a signature is specific enough to anchor recall on.
+ *
+ * A signature is an equality key. One built only from "a command exited
+ * non-zero" matches every other command that exited non-zero, so it must not
+ * be indexed even though the failure itself is still worth storing.
+ */
+export function isAnchorableSignature(signature) {
+    // Strip what the harness contributes before judging what is left. The
+    // `[tool_result]` prefix is added by the watcher when flattening parts, so
+    // `[tool_result] Exit code 1` looked like 25 characters of signal and is
+    // really none: every failed command produces exactly that string.
+    const residual = signature
+        .replace(/^\s*\[tool_result\]\s*/i, "")
+        .replace(EXIT_CODE_PATTERN, "")
+        .replace(/[\s\-=]+/g, " ")
+        .trim();
+    return residual.length >= 12;
+}
 export function normalizeError(raw, opts = {}) {
-    let normalized = raw.trim();
+    // Isolate the failure before normalizing it. Everything downstream treats
+    // the result as a fingerprint to match against future failures, and text
+    // that merely surrounded the error this one time defeats that.
+    let normalized = extractErrorLines(raw).trim();
     // 1. Strip absolute paths
     for (const pat of ABSOLUTE_PATH_PATTERNS) {
         normalized = normalized.replace(pat.re, pat.replace);
@@ -35,6 +125,11 @@ export function normalizeError(raw, opts = {}) {
     normalized = normalized.replace(/[,:;.]$/, "");
     // 4. Fold whitespace
     normalized = normalized.replace(/\s+/g, " ");
+    // 5. Cap. A signature is an equality key; past a couple of hundred
+    // characters it is carrying incidental detail that will differ next time.
+    if (normalized.length > MAX_SIGNATURE_CHARS) {
+        normalized = normalized.slice(0, MAX_SIGNATURE_CHARS);
+    }
     return normalized;
 }
 /**
