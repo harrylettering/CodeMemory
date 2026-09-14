@@ -41,7 +41,8 @@ export interface DecisionSupersedeJudge {
 }
 
 export interface DecisionJudgeConfig {
-  model: string;
+  /** Unset = no `--model` argument, so the host default applies. */
+  model?: string;
   timeoutMs: number;
 }
 

@@ -118,7 +118,7 @@ ln -sf "$(pwd)" ~/.claude/plugins/codememory
 
 所有配置通过 `CODEMEMORY_*` 环境变量传入，在 [`src/db/config.ts`](./src/db/config.ts) 中解析。最常用的几条：
 
-每个模型环境变量都独立配置；如果没有显式设置，都会默认使用 `claude-haiku-4-5-20251001`。
+每个模型环境变量都独立配置，四个默认都不设置。不设置意味着不传 `--model` 参数，被拉起的 `claude --print` 会使用宿主当前配置的模型。想固定某个调用点的模型，单独设置那一个即可。
 
 | 变量 | 默认值 | 说明 |
 |---|---|---|
@@ -130,10 +130,10 @@ ln -sf "$(pwd)" ~/.claude/plugins/codememory
 | `CODEMEMORY_COMPACTION_TOKEN_THRESHOLD` | `30000` | 触发 compaction 的未压缩 M/L token 阈值。 |
 | `CODEMEMORY_COMPACTION_FRESH_TAIL_COUNT` | `20` | 永远不参与压缩的最近消息条数。 |
 | `CODEMEMORY_COMPACTION_DISABLE_LLM` | `false` | 跳过 `claude --print`，改用截断 fallback。离线 / CI 必须开启。 |
-| `CODEMEMORY_EXPANSION_MODEL` | `claude-haiku-4-5-20251001` | `codememory_expand` 与 `codememory_expand_query` 使用的模型。 |
-| `CODEMEMORY_QUERY_PLANNER_MODEL` | `claude-haiku-4-5-20251001` | 可选 query planner 使用的模型。 |
-| `CODEMEMORY_COMPACTION_MODEL` | `claude-haiku-4-5-20251001` | compaction 使用的模型。 |
-| `CODEMEMORY_AUTO_SUPERSEDE_MODEL` | `claude-haiku-4-5-20251001` | 可选 auto-supersede judge 使用的模型。 |
+| `CODEMEMORY_EXPANSION_MODEL` | _(unset)_ | `codememory_expand` 与 `codememory_expand_query` 使用的模型。 |
+| `CODEMEMORY_QUERY_PLANNER_MODEL` | _(unset)_ | 可选 query planner 使用的模型。 |
+| `CODEMEMORY_COMPACTION_MODEL` | _(unset)_ | compaction 使用的模型。 |
+| `CODEMEMORY_AUTO_SUPERSEDE_MODEL` | _(unset)_ | 可选 auto-supersede judge 使用的模型。 |
 | `CODEMEMORY_QUERY_PLANNER_ENABLED` | `false` | fast-path 检索过弱时，启用可选 LLM planner。 |
 | `CODEMEMORY_AUTO_SUPERSEDE_VIA_LLM` | `false` | 在单个 conversation 内自动检测隐式 decision supersede。 |
 | `CODEMEMORY_EXPLORED_TARGET_WINDOW_MS` | `1800000`（30 分钟）| 同一 Read/Grep/Glob 目标在此窗口内重复探索会从 L 衰减到 N。 |

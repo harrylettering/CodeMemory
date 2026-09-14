@@ -118,7 +118,7 @@ Once installed, CodeMemory runs mostly on its own:
 
 All configuration goes through `CODEMEMORY_*` environment variables resolved in [`src/db/config.ts`](./src/db/config.ts). The most useful knobs:
 
-Each model env var is configured independently. If you do not set it explicitly, each one defaults to `claude-haiku-4-5-20251001`.
+Each model env var is configured independently and all four are unset by default. Unset means no `--model` argument is passed, so the spawned `claude --print` uses whatever model the host is configured for. Set one to pin that call site.
 
 | Variable | Default | Description |
 |---|---|---|
@@ -130,10 +130,10 @@ Each model env var is configured independently. If you do not set it explicitly,
 | `CODEMEMORY_COMPACTION_TOKEN_THRESHOLD` | `30000` | Uncompacted M/L token budget that triggers compaction. |
 | `CODEMEMORY_COMPACTION_FRESH_TAIL_COUNT` | `20` | Most-recent messages protected from compaction. |
 | `CODEMEMORY_COMPACTION_DISABLE_LLM` | `false` | Skip `claude --print` and use truncation fallback. Required offline / in CI. |
-| `CODEMEMORY_EXPANSION_MODEL` | `claude-haiku-4-5-20251001` | Model used by `codememory_expand` and `codememory_expand_query`. |
-| `CODEMEMORY_QUERY_PLANNER_MODEL` | `claude-haiku-4-5-20251001` | Model used by the optional query planner. |
-| `CODEMEMORY_COMPACTION_MODEL` | `claude-haiku-4-5-20251001` | Model used for compaction. |
-| `CODEMEMORY_AUTO_SUPERSEDE_MODEL` | `claude-haiku-4-5-20251001` | Model used by the optional auto-supersede judge. |
+| `CODEMEMORY_EXPANSION_MODEL` | _(unset)_ | Model used by `codememory_expand` and `codememory_expand_query`. |
+| `CODEMEMORY_QUERY_PLANNER_MODEL` | _(unset)_ | Model used by the optional query planner. |
+| `CODEMEMORY_COMPACTION_MODEL` | _(unset)_ | Model used for compaction. |
+| `CODEMEMORY_AUTO_SUPERSEDE_MODEL` | _(unset)_ | Model used by the optional auto-supersede judge. |
 | `CODEMEMORY_QUERY_PLANNER_ENABLED` | `false` | Enable the optional LLM planner after weak fast-path retrieval. |
 | `CODEMEMORY_AUTO_SUPERSEDE_VIA_LLM` | `false` | Auto-detect implicit decision supersedes within a conversation. |
 | `CODEMEMORY_EXPLORED_TARGET_WINDOW_MS` | `1800000` (30 min) | Repeat exploration of the same Read/Grep/Glob target inside this window decays L → N. |
