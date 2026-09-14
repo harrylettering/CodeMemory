@@ -4,7 +4,7 @@
 
 所有配置都通过 `CODEMEMORY_` 前缀的环境变量传入。默认值在 [`src/db/config.ts`](../src/db/config.ts) 的 `resolveCodeMemoryConfig` 中解析。README 的 Configuration 段只列出了最常调的旋钮；本文档是完整覆盖面。
 
-每个模型环境变量都是独立的：`CODEMEMORY_EXPANSION_MODEL`、`CODEMEMORY_QUERY_PLANNER_MODEL`、`CODEMEMORY_COMPACTION_MODEL`、`CODEMEMORY_AUTO_SUPERSEDE_MODEL` 在未设置时都会各自默认到 `claude-haiku-4-5-20251001`。
+每个模型环境变量都是独立的，`CODEMEMORY_EXPANSION_MODEL`、`CODEMEMORY_QUERY_PLANNER_MODEL`、`CODEMEMORY_COMPACTION_MODEL`、`CODEMEMORY_AUTO_SUPERSEDE_MODEL` 四个默认都不设置。不设置意味着不传 `--model`，直接用宿主当前的模型。空字符串按未设置处理，不会被当成一个名字为空的模型。
 
 > 旧文档里出现过、但本文未列出的环境变量，已在清理中作为 dead-letter 删除（在 config 中声明但运行时无人消费）。如果你的 shell 中还设置着这些变量，它们现在已经无效，可以移除。
 
@@ -25,7 +25,7 @@
 | `CODEMEMORY_COMPACTION_TOKEN_THRESHOLD` | `30000` | 未压缩 M/L tier 消息 token 累计达到此值触发 compaction。 |
 | `CODEMEMORY_COMPACTION_FRESH_TAIL_COUNT` | `20` | 永远不参与压缩的最近消息条数 — 压缩只触碰早于这些消息的部分。 |
 | `CODEMEMORY_COMPACTION_DISABLE_LLM` | `false` | 跳过 `claude --print`，使用截断 fallback。离线 / CI 必须开启。 |
-| `CODEMEMORY_COMPACTION_MODEL` | `claude-haiku-4-5-20251001` | compaction 使用的模型。 |
+| `CODEMEMORY_COMPACTION_MODEL` | _(unset)_ | compaction 使用的模型。 |
 | `CODEMEMORY_COMPACTION_MAX_INPUT_CHARS` | `24000` | 每个批次喂给 `claude --print` 的字符上限（约 6k tokens）。同时是 `leafChunkTokens` 的实际上限。 |
 
 ## Summary DAG 形状
@@ -46,7 +46,7 @@
 | 变量 | 默认值 | 作用 |
 |---|---|---|
 | `CODEMEMORY_QUERY_PLANNER_ENABLED` | `false` | 启用可选 LLM query planner，仅在确定性 fast plan 召回偏弱时触发。会在这些 prompt 上多一次 `claude --print` 调用。 |
-| `CODEMEMORY_QUERY_PLANNER_MODEL` | `claude-haiku-4-5-20251001` | planner 使用的模型。 |
+| `CODEMEMORY_QUERY_PLANNER_MODEL` | _(unset)_ | planner 使用的模型。 |
 | `CODEMEMORY_QUERY_PLANNER_TIMEOUT_MS` | `1200` | planner 子进程硬超时。planner 自己 kill 自己，绝不阻塞 prompt 注入。 |
 | `CODEMEMORY_QUERY_PLANNER_MAX_TOKENS` | `800` | planner 配置接口里声明的 token 上限（目前用于 contract / 测试，尚未作为 CLI 参数传出）。 |
 | `CODEMEMORY_EXPLORED_TARGET_WINDOW_MS` | `1800000`（30 分钟）| 同一 Read/Grep/Glob 目标在此窗口内重复探索会从 L 衰减到 N。超过窗口认为文件可能变了，再读视为新信号。 |
@@ -58,7 +58,7 @@
 
 | 变量 | 默认值 | 作用 |
 |---|---|---|
-| `CODEMEMORY_EXPANSION_MODEL` | `claude-haiku-4-5-20251001` | expansion 子 agent 的模型。 |
+| `CODEMEMORY_EXPANSION_MODEL` | _(unset)_ | expansion 子 agent 的模型。 |
 | `CODEMEMORY_EXPANSION_PROVIDER` | `anthropic` | expansion 子 agent 的 provider。 |
 | `CODEMEMORY_MAX_EXPAND_TOKENS` | `4000` | `codememory_expand` 的 token 上限。 |
 | `CODEMEMORY_DELEGATION_TIMEOUT_MS` | `120000` | 委托 expansion 子进程的超时。 |
@@ -70,7 +70,7 @@
 | 变量 | 默认值 | 作用 |
 |---|---|---|
 | `CODEMEMORY_AUTO_SUPERSEDE_VIA_LLM` | `false` | LLM-as-judge auto-supersede 总开关。 |
-| `CODEMEMORY_AUTO_SUPERSEDE_MODEL` | `claude-haiku-4-5-20251001` | judge 模型。 |
+| `CODEMEMORY_AUTO_SUPERSEDE_MODEL` | _(unset)_ | judge 模型。 |
 | `CODEMEMORY_AUTO_SUPERSEDE_MAX_CANDIDATES` | `20` | 每次 judge 考虑的活跃 decision 上限。 |
 | `CODEMEMORY_AUTO_SUPERSEDE_TIMEOUT_MS` | `8000` | judge 调用硬超时。 |
 

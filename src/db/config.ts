@@ -13,7 +13,15 @@
 import { homedir } from "node:os";
 import { join } from "node:path";
 
-export const DEFAULT_CODEMEMORY_MODEL = "claude-haiku-4-5-20251001";
+/**
+ * The four CODEMEMORY_*_MODEL knobs are unset by default, and unset means no
+ * `--model` argument: the spawned `claude --print` uses whatever model the
+ * host is configured for. Pinning a default here silently overrode that
+ * choice, and a pinned id also rots -- it names one specific release that
+ * will eventually stop being the right answer.
+ *
+ * Set an individual knob to pin that one call site.
+ */
 
 export interface CodeMemoryConfig {
   /** Minimum number of depth>=1 summaries needed for condensation. */
@@ -30,8 +38,8 @@ export interface CodeMemoryConfig {
   summaryMaxOverageFactor: number;
   /** Path to SQLite database (default: ~/.claude/codememory.db) */
   databasePath: string;
-  /** Model used by the codememory_expand_query sub-agent (default: claude-haiku-4-5-20251001) */
-  expansionModel: string;
+  /** Model for the codememory_expand_query sub-agent. Unset = host default. */
+  expansionModel?: string;
   /** Provider override for codememory_expand_query sub-agent */
   expansionProvider?: string;
   /** Token cap for codememory_expand operations */
@@ -46,8 +54,8 @@ export interface CodeMemoryConfig {
   debugToolsEnabled: boolean;
   /** Whether the optional LLM query planner can run after a weak fast-path retrieval. */
   queryPlannerEnabled: boolean;
-  /** Model used for query planner calls (default: claude-haiku-4-5-20251001). */
-  queryPlannerModel: string;
+  /** Model for query planner calls. Unset = host default. */
+  queryPlannerModel?: string;
   /** Timeout for query planner calls (ms). */
   queryPlannerTimeoutMs: number;
   /** Max tokens requested from the query planner. */
@@ -58,8 +66,8 @@ export interface CodeMemoryConfig {
   compactionTokenThreshold: number;
   /** Number of most-recent uncompacted messages to preserve as "fresh tail" (default 20) */
   compactionFreshTailCount: number;
-  /** Model used for LLM-based summarization (default: claude-haiku-4-5-20251001) */
-  compactionModel: string;
+  /** Model for LLM-based summarization. Unset = host default. */
+  compactionModel?: string;
   /** Max characters of message content fed to `claude --print` per batch (default 24000 ≈ 6k tokens) */
   compactionMaxInputChars: number;
   /** If true, skip the LLM call and use the truncation fallback. Useful in
@@ -82,8 +90,8 @@ export interface CodeMemoryConfig {
    * Same-conversation only; cross-session is never auto-handled.
    */
   autoSupersedeViaLlm: boolean;
-  /** Model used by the auto-supersede judge (default: claude-haiku-4-5-20251001). */
-  autoSupersedeModel: string;
+  /** Model for the auto-supersede judge. Unset = host default. */
+  autoSupersedeModel?: string;
   /** Max active decisions in the conversation considered by the judge per call (default 20). */
   autoSupersedeMaxCandidates: number;
   /** Timeout for the judge LLM call in milliseconds (default 8000). */
@@ -104,7 +112,7 @@ export function resolveCodeMemoryConfig(env: NodeJS.ProcessEnv = process.env): C
     condensedTargetTokens: parseInt(env.CODEMEMORY_CONDENSED_TARGET_TOKENS || "2000"),
     summaryMaxOverageFactor: parseFloat(env.CODEMEMORY_SUMMARY_MAX_OVERAGE_FACTOR || "3"),
     databasePath: env.CODEMEMORY_DATABASE_PATH || DEFAULT_DB_PATH,
-    expansionModel: env.CODEMEMORY_EXPANSION_MODEL || DEFAULT_CODEMEMORY_MODEL,
+    expansionModel: env.CODEMEMORY_EXPANSION_MODEL || undefined,
     expansionProvider: env.CODEMEMORY_EXPANSION_PROVIDER,
     maxExpandTokens: parseInt(env.CODEMEMORY_MAX_EXPAND_TOKENS || "4000"),
     delegationTimeoutMs: parseInt(env.CODEMEMORY_DELEGATION_TIMEOUT_MS || "120000"),
@@ -112,13 +120,13 @@ export function resolveCodeMemoryConfig(env: NodeJS.ProcessEnv = process.env): C
     enabled: env.CODEMEMORY_ENABLED !== "false",
     debugToolsEnabled: env.CODEMEMORY_DEBUG_TOOLS_ENABLED === "true",
     queryPlannerEnabled: env.CODEMEMORY_QUERY_PLANNER_ENABLED === "true",
-    queryPlannerModel: env.CODEMEMORY_QUERY_PLANNER_MODEL || DEFAULT_CODEMEMORY_MODEL,
+    queryPlannerModel: env.CODEMEMORY_QUERY_PLANNER_MODEL || undefined,
     queryPlannerTimeoutMs: parseInt(env.CODEMEMORY_QUERY_PLANNER_TIMEOUT_MS || "1200"),
     queryPlannerMaxTokens: parseInt(env.CODEMEMORY_QUERY_PLANNER_MAX_TOKENS || "800"),
     compactionEnabled: env.CODEMEMORY_COMPACTION_ENABLED !== "false",
     compactionTokenThreshold: parseInt(env.CODEMEMORY_COMPACTION_TOKEN_THRESHOLD || "30000"),
     compactionFreshTailCount: parseInt(env.CODEMEMORY_COMPACTION_FRESH_TAIL_COUNT || "20"),
-    compactionModel: env.CODEMEMORY_COMPACTION_MODEL || DEFAULT_CODEMEMORY_MODEL,
+    compactionModel: env.CODEMEMORY_COMPACTION_MODEL || undefined,
     compactionMaxInputChars: parseInt(env.CODEMEMORY_COMPACTION_MAX_INPUT_CHARS || "24000"),
     compactionDisableLlm: env.CODEMEMORY_COMPACTION_DISABLE_LLM === "true",
     exploredTargetWindowMs: parseInt(
@@ -126,8 +134,7 @@ export function resolveCodeMemoryConfig(env: NodeJS.ProcessEnv = process.env): C
     ),
     workspaceRoot: env.CODEMEMORY_WORKSPACE_ROOT || process.cwd(),
     autoSupersedeViaLlm: env.CODEMEMORY_AUTO_SUPERSEDE_VIA_LLM === "true",
-    autoSupersedeModel:
-      env.CODEMEMORY_AUTO_SUPERSEDE_MODEL || DEFAULT_CODEMEMORY_MODEL,
+    autoSupersedeModel: env.CODEMEMORY_AUTO_SUPERSEDE_MODEL || undefined,
     autoSupersedeMaxCandidates: parseInt(
       env.CODEMEMORY_AUTO_SUPERSEDE_MAX_CANDIDATES || "20"
     ),

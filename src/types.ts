@@ -33,7 +33,8 @@ export type CompletionResult = {
 
 export type CompleteFn = (params: {
   provider?: string;
-  model: string;
+  /** Omitted when no model is configured, so the host picks its own. */
+  model?: string;
   apiKey?: string;
   providerApi?: string;
   authProfileId?: string;
