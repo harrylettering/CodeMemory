@@ -117,6 +117,15 @@ async function startDaemon(args) {
         const RESOLVE_STALE_WINDOW = 50;
         const STALE_MAINTENANCE_INTERVAL_MS = 60 * 60 * 1000;
         let lastStaleMaintenanceAt = 0;
+        // Anything that means this session is still alive: a hook talking to the
+        // socket, or a line appearing in a transcript. SessionEnd is not a
+        // reliable signal -- it does not run when a terminal is closed, a process
+        // is killed, or a machine sleeps, and it can be cancelled mid-run -- which
+        // is why daemons outlived their sessions by days.
+        let lastActivityAt = Date.now();
+        const markActive = () => {
+            lastActivityAt = Date.now();
+        };
         // Anti-flood debounce. The same target won't be warned about more
         // than once within this many milliseconds (cleared on daemon restart).
         const WARN_DEBOUNCE_MS = 60_000;
@@ -170,6 +179,7 @@ async function startDaemon(args) {
             }
         };
         const lookupServer = http.createServer((req, res) => {
+            markActive();
             if (req.method !== "POST") {
                 res.statusCode = 404;
                 res.end();
@@ -444,6 +454,13 @@ async function startDaemon(args) {
                 }
             });
         });
+        // Without a handler a listen failure is an unhandled 'error' event, which
+        // takes the process down with a stack trace instead of a reason. The two
+        // that actually happen are a stale socket left by a daemon that died
+        // without cleaning up, and a socket path over the ~104-byte limit.
+        lookupServer.on("error", (err) => {
+            logger.error(`Lookup socket failed to listen at ${socketPath}: ${err}`);
+        });
         lookupServer.listen(socketPath, () => {
             try {
                 fs.chmodSync(socketPath, 0o600);
@@ -522,6 +539,7 @@ async function startDaemon(args) {
             // `agent-<agentId>.jsonl` while every entry inside it carries the
             // *parent* session id — which is the right owner. A subagent's work
             // is part of the session that dispatched it, not a session of its own.
+            markActive();
             const fileName = path.basename(filePath, ".jsonl");
             const fileSessionId = message.metadata?.sessionId || fileName || sessionId;
             try {
@@ -979,13 +997,38 @@ async function startDaemon(args) {
                 keyMemories,
             };
         };
+        // The watcher stays database-free; the daemon owns durable state and hands
+        // it in. Without this the offset map is process-local, so every restart
+        // had to choose between re-emitting whole transcripts and skipping
+        // whatever arrived while the process was down.
+        const offsetStore = {
+            async load() {
+                const rows = await db.all("SELECT filePath, charOffset FROM watcher_offsets");
+                const map = new Map();
+                for (const row of rows) {
+                    if (typeof row.filePath === "string" && Number.isFinite(row.charOffset)) {
+                        map.set(row.filePath, row.charOffset);
+                    }
+                }
+                return map;
+            },
+            async save(filePath, charOffset) {
+                await db.run(`INSERT INTO watcher_offsets (filePath, charOffset, updatedAt)
+           VALUES (?, ?, ?)
+           ON CONFLICT(filePath) DO UPDATE SET
+             charOffset = excluded.charOffset,
+             updatedAt = excluded.updatedAt`, [filePath, charOffset, new Date().toISOString()]);
+            },
+        };
         watcher = await startProjectWatcher(logger, {
             sessionId,
             projectPath,
             pollInterval: 2000,
-            // Live ingestion only: transcripts already on disk when the daemon
-            // starts are treated as handled, so a restart cannot re-emit their
-            // prefixes as duplicate rows. Gaps are closed with /reimport.
+            offsetStore,
+            // Applies only to transcripts with no stored offset. A file this
+            // project has read before resumes from where it stopped; one it has
+            // never seen is still written off, since nothing claims to have
+            // ingested it and replaying it whole would duplicate rows.
             seedExistingFilesToEnd: true,
             onMessage: ingestOne,
         });
@@ -1024,8 +1067,25 @@ async function startDaemon(args) {
             logger.info("Daemon stopped");
             process.exit(0);
         }
-        // Keep process running
-        setInterval(() => { }, 1000);
+        // Keep the process alive, and decide for itself when it should stop.
+        //
+        // Exiting is cheap now that read positions survive the process: the next
+        // daemon for this project resumes from the stored offset, so an idle exit
+        // delays ingestion rather than losing it. Before offsets were durable this
+        // would have silently dropped everything written while nothing watched.
+        const idleTimeoutMs = config.daemonIdleTimeoutMs;
+        setInterval(() => {
+            if (idleTimeoutMs <= 0)
+                return;
+            const idleMs = Date.now() - lastActivityAt;
+            if (idleMs < idleTimeoutMs)
+                return;
+            logger.info(`No activity for ${Math.round(idleMs / 60000)} minutes, shutting down`);
+            void cleanup();
+            // Checked well inside the timeout so the exit is not a whole interval
+            // late, and so a short timeout can actually be exercised in a test
+            // rather than only reasoned about.
+        }, Math.max(1_000, Math.min(60_000, Math.floor(idleTimeoutMs / 2) || 60_000)));
     }
     catch (error) {
         logger.error(`Daemon failed: ${error}`);

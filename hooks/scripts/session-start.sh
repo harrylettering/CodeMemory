@@ -40,6 +40,44 @@ echo "[codememory] Session start: $SESSION_ID in $CWD" >&2
 echo "[$(date -Iseconds)] Initializing database" >> "$LOG_FILE"
 "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/init-db.sh"
 
+# Reap the runtime files of daemons that are gone.
+#
+# Each session's .pid and .sock are named after a session id that never recurs,
+# so the existing same-id probe below can never clean up after a previous
+# session -- leaving the directory to accumulate one dead pair per session
+# forever.
+#
+# This only deletes files, and only when the process is demonstrably gone. It
+# never signals anything, so a recycled pid cannot lead it to kill an unrelated
+# process; the worst case is leaving a pair in place for another session.
+RUNTIME_DIR="${HOME}/.claude/codememory-runtime"
+if [ -d "$RUNTIME_DIR" ]; then
+    SWEPT=0
+    for pidfile in "$RUNTIME_DIR"/*.pid; do
+        [ -e "$pidfile" ] || continue
+        sid=$(basename "$pidfile" .pid)
+        [ "$sid" = "$SESSION_ID" ] && continue
+        pid=$(cat "$pidfile" 2>/dev/null | tr -d '[:space:]')
+        if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+            continue
+        fi
+        rm -f "$pidfile" "$RUNTIME_DIR/$sid.sock"
+        SWEPT=$((SWEPT + 1))
+    done
+    # A socket with no pid file beside it belongs to a daemon that died without
+    # running its teardown, which is the common case this exists for.
+    for sockfile in "$RUNTIME_DIR"/*.sock; do
+        [ -e "$sockfile" ] || continue
+        sid=$(basename "$sockfile" .sock)
+        [ "$sid" = "$SESSION_ID" ] && continue
+        [ -e "$RUNTIME_DIR/$sid.pid" ] && continue
+        rm -f "$sockfile"
+        SWEPT=$((SWEPT + 1))
+    done
+    [ "$SWEPT" -gt 0 ] && \
+        echo "[$(date -Iseconds)] Swept $SWEPT stale runtime file(s)" >> "$LOG_FILE"
+fi
+
 # Start JSONL watcher daemon
 echo "[$(date -Iseconds)] Starting JSONL watcher daemon" >> "$LOG_FILE"
 echo "[$(date -Iseconds)] CLAUDE_PLUGIN_ROOT=${CLAUDE_PLUGIN_ROOT:-}" >> "$LOG_FILE"

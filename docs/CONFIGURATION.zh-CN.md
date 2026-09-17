@@ -72,6 +72,7 @@
 | `CODEMEMORY_AUTO_SUPERSEDE_VIA_LLM` | `false` | LLM-as-judge auto-supersede 总开关。 |
 | `CODEMEMORY_AUTO_SUPERSEDE_MODEL` | _(unset)_ | judge 模型。 |
 | `CODEMEMORY_AUTO_SUPERSEDE_MAX_CANDIDATES` | `20` | 每次 judge 考虑的活跃 decision 上限。 |
+| `CODEMEMORY_DAEMON_IDLE_TIMEOUT_MS` | `1800000`（30 分钟） | 多久没有活动后 daemon 自行退出。钩子访问 socket、或 transcript 出现新行都算活动。`0` 关闭。SessionEnd 不是可靠的收尾信号，不设这个的话 daemon 会一直活到机器重启。 |
 | `CODEMEMORY_AUTO_SUPERSEDE_TIMEOUT_MS` | `8000` | judge 调用硬超时。 |
 
 ## 已清理（不再识别）
