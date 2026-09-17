@@ -436,6 +436,7 @@ export class MemoryNodeStore {
                 resolvedFailureOlderThanDays: input.resolvedFailureOlderThanDays ?? 90,
                 resolvedFixAttemptOlderThanDays: input.resolvedFixAttemptOlderThanDays ?? 90,
                 supersededOlderThanDays: input.supersededOlderThanDays ?? 30,
+                activeTaskOlderThanDays: input.activeTaskOlderThanDays ?? 14,
             });
             if (!staleReason)
                 continue;
@@ -1558,6 +1559,13 @@ function staleReasonForNode(node, policy) {
     }
     if (node.kind === "fix_attempt" && node.status === "resolved" && updatedAgeDays >= policy.resolvedFixAttemptOlderThanDays && lowUse) {
         return `resolved fix attempt inactive for ${Math.floor(updatedAgeDays)} days`;
+    }
+    // An old active task is stale rather than resolved: the transcript cannot
+    // say whether it was finished or abandoned, only that nothing has referred
+    // to it in a long time. `lowUse` keeps a task that is still being recalled
+    // and used out of this branch, so a genuinely long-running goal survives.
+    if (node.kind === "task" && node.status === "active" && updatedAgeDays >= policy.activeTaskOlderThanDays && lowUse) {
+        return `active task untouched for ${Math.floor(updatedAgeDays)} days`;
     }
     return null;
 }

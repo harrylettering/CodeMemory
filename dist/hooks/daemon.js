@@ -709,7 +709,10 @@ async function startDaemon(args) {
                 if (nowMs - lastStaleMaintenanceAt >= STALE_MAINTENANCE_INTERVAL_MS) {
                     lastStaleMaintenanceAt = nowMs;
                     try {
-                        const result = await memoryStore.runStaleMaintenance({ limit: 100 });
+                        const result = await memoryStore.runStaleMaintenance({
+                            limit: 100,
+                            activeTaskOlderThanDays: config.activeTaskStaleDays,
+                        });
                         if (result.staleNodeIds.length > 0) {
                             logger.debug(`marked ${result.staleNodeIds.length} memory node(s) stale`);
                         }

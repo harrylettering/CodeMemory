@@ -89,6 +89,12 @@ export interface CodeMemoryConfig {
    * relies on the model passing `supersedesNodeId` itself.
    * Same-conversation only; cross-session is never auto-handled.
    */
+  /**
+   * Days after which an untouched active task stops being treated as current.
+   * A task has no terminal state of its own, so without this it is recalled
+   * as the current goal forever.
+   */
+  activeTaskStaleDays: number;
   autoSupersedeViaLlm: boolean;
   /** Model for the auto-supersede judge. Unset = host default. */
   autoSupersedeModel?: string;
@@ -133,6 +139,9 @@ export function resolveCodeMemoryConfig(env: NodeJS.ProcessEnv = process.env): C
       env.CODEMEMORY_EXPLORED_TARGET_WINDOW_MS || String(30 * 60 * 1000)
     ),
     workspaceRoot: env.CODEMEMORY_WORKSPACE_ROOT || process.cwd(),
+    activeTaskStaleDays: parseInt(
+      env.CODEMEMORY_ACTIVE_TASK_STALE_DAYS || "14"
+    ),
     autoSupersedeViaLlm: env.CODEMEMORY_AUTO_SUPERSEDE_VIA_LLM === "true",
     autoSupersedeModel: env.CODEMEMORY_AUTO_SUPERSEDE_MODEL || undefined,
     autoSupersedeMaxCandidates: parseInt(

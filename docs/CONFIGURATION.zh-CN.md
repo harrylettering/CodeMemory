@@ -72,6 +72,7 @@
 | `CODEMEMORY_AUTO_SUPERSEDE_VIA_LLM` | `false` | LLM-as-judge auto-supersede 总开关。 |
 | `CODEMEMORY_AUTO_SUPERSEDE_MODEL` | _(unset)_ | judge 模型。 |
 | `CODEMEMORY_AUTO_SUPERSEDE_MAX_CANDIDATES` | `20` | 每次 judge 考虑的活跃 decision 上限。 |
+| `CODEMEMORY_ACTIVE_TASK_STALE_DAYS` | `14` | 活跃 task 多少天没被触碰后标记为 stale。task 是唯一没有自身终态的 kind，不设这个的话做完的任务会被永远当成当前目标召回。仍在被检索命中的 task 不受影响。 |
 | `CODEMEMORY_AUTO_SUPERSEDE_TIMEOUT_MS` | `8000` | judge 调用硬超时。 |
 
 ## 已清理（不再识别）

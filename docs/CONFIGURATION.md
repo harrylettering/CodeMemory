@@ -72,6 +72,7 @@ When enabled, a single haiku call detects whether a newly marked decision implic
 | `CODEMEMORY_AUTO_SUPERSEDE_VIA_LLM` | `false` | Master switch for the LLM-as-judge auto-supersede path. |
 | `CODEMEMORY_AUTO_SUPERSEDE_MODEL` | _(unset)_ | Judge model. |
 | `CODEMEMORY_AUTO_SUPERSEDE_MAX_CANDIDATES` | `20` | Max active decisions the judge considers per call. |
+| `CODEMEMORY_ACTIVE_TASK_STALE_DAYS` | `14` | Days after which an untouched active task is marked stale. Tasks have no terminal state of their own, so without this a finished task is recalled as the current goal forever. A task retrieval keeps using is exempt. |
 | `CODEMEMORY_AUTO_SUPERSEDE_TIMEOUT_MS` | `8000` | Hard timeout for the judge call. |
 
 ## Removed in cleanup (no longer recognized)
