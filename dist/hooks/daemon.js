@@ -460,6 +460,23 @@ async function startDaemon(args) {
         // without cleaning up, and a socket path over the ~104-byte limit.
         lookupServer.on("error", (err) => {
             logger.error(`Lookup socket failed to listen at ${socketPath}: ${err}`);
+            // Exit rather than linger. A daemon that cannot serve its socket is
+            // useless, and two hooks racing to respawn one must leave exactly one
+            // process behind: the loser hits EADDRINUSE here and stands down, so
+            // the bind itself is the lock.
+            // Only reclaim the pid file if it still names this process. The pid is
+            // written before the bind is attempted, so the loser of a race has
+            // already overwritten the winner's entry; deleting it blindly would
+            // leave a live daemon with no pid file for stop or sweep to find.
+            try {
+                const owner = fs.readFileSync(pidFile, "utf-8").trim();
+                if (owner === String(process.pid))
+                    fs.unlinkSync(pidFile);
+            }
+            catch {
+                /* no pid file to reclaim */
+            }
+            process.exit(1);
         });
         lookupServer.listen(socketPath, () => {
             try {
