@@ -73,16 +73,16 @@ getRelationsForNodes    关系缝合（两跳）             6 条 SQL
 
 ## 项目进度
 ```
-[====············] 29% 已完成
+[======··········] 43% 已完成
 ```
 
 ## 统计信息
 - 总任务数: 7
-- 已完成: 2
+- 已完成: 3
 - 执行中: 0
-- 待执行: 5
+- 待执行: 4
 - 失败: 0
-- 完成率: 29%
+- 完成率: 43%
 
 ---
 
@@ -139,8 +139,8 @@ getRelationsForNodes    关系缝合（两跳）             6 条 SQL
 - **契约变更**: `memory-store.test.ts` 那条 `prefers current conversation` 改为 `within the conversation only`。
   偏好变成了排他，是契约变了不是测试坏了，注释里写明了
 
-### ⏳ TASK-003: findFailuresByAnchors 加会话过滤并打通热路径
-- **状态**: pending
+### ✅ TASK-003: findFailuresByAnchors 加会话过滤并打通热路径
+- **状态**: completed
 - **描述**: SQL 加过滤；`lookupForPreToolUse` 的 `options` 增加 `conversationId` 并由 daemon 与冷路径 CLI 传入
 - **预估时间**: 2 小时
 - **优先级**: 高
@@ -156,7 +156,15 @@ getRelationsForNodes    关系缝合（两跳）             6 条 SQL
   - 风险描述: 热路径拿不到 `conversationId` 时如果静默退化为"不过滤"，泄漏会完全无声
   - 应对建议: 拿不到就**返回空**，并写一行 `failure_lookup_events` 记 `no_target`，让埋点看得见
 - **回滚方案**: `git revert`；该任务独立成 commit
-- **交付物**: `src/store/memory-store.ts`, `src/failure-lookup.ts`, `src/failure-lookup-cli.ts`, `src/hooks/daemon.ts`, `src/tools/codememory-check-prior-failures-tool.ts`
+- **完成时间**: 2026-09-19
+- **交付物**: 上述五个文件，外加 `src/retrieval.ts`、迁移 31、5 个测试文件
+- **真实库验证**: 样本失败节点属于 conv10；以 conv10 查到 1 个候选，以 conv999 查到 0 个，
+  会话未知查到 0 个；热路径无作用域时 `shouldInject=false` 且 `unresolvedConversation=true`
+- **计划外增加的迁移 31**: `failure_lookup_events.unresolvedConversation`。
+  原计划说复用 `no_target`，实施时判定那是**把两种原因合并**——"查了没找到"和"根本没查"
+  需要相反的修法，而 outcome 的 CHECK 约束不重建表就加不了值，所以用一列而不是新值
+- **反转的测试**: `injects across sessions (the whole point of cross-session recall)`
+  → `does not inject a failure another session recorded`，注释写明是产品定义变了
 
 ### ⏳ TASK-003b: 检索类工具统一注入 conversationId
 - **状态**: pending

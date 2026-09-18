@@ -115,6 +115,7 @@ describe("symbol pivot — end-to-end (extractor → memoryStore → tool)", () 
       1
     );
     const candidates = await memoryStore.findFailuresByAnchors({
+        conversationId: 1,
       symbols: ["get_profile"],
       statuses: ["active"],
     });
@@ -152,7 +153,7 @@ describe("symbol pivot — end-to-end (extractor → memoryStore → tool)", () 
       2
     );
     const tool = new CodeMemoryCheckPriorFailuresTool(memoryStore);
-    const result = await tool.check({ symbol: "validateUserInput" });
+    const result = await tool.check({ symbol: "validateUserInput", conversationId: 1 });
     expect(result.found).toBe(true);
     expect(result.failures[0].symbol).toBe("validateUserInput");
     expect(result.failures[0].filePath).toBe("/repo/src/utils/validation.ts");

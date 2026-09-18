@@ -71,7 +71,7 @@ describe("CodeMemoryCheckPriorFailuresTool", () => {
   it("finds a seeded failure by filePath and reports confidence", async () => {
     await seed();
 
-    const result = await newTool().check({ filePath: "/repo/src/foo.ts" });
+    const result = await newTool().check({ filePath: "/repo/src/foo.ts", conversationId: 1 });
 
     expect(result.found).toBe(true);
     expect(result.count).toBe(1);
@@ -85,6 +85,7 @@ describe("CodeMemoryCheckPriorFailuresTool", () => {
     await seed();
     const result = await newTool().check({
       filePath: "/repo/src/unrelated.ts",
+      conversationId: 1,
     });
 
     expect(result.found).toBe(false);
@@ -101,7 +102,7 @@ describe("CodeMemoryCheckPriorFailuresTool", () => {
       raw: "npm ERR! code ELIFECYCLE",
     });
 
-    const result = await newTool().check({ command: "npm test" });
+    const result = await newTool().check({ command: "npm test", conversationId: 1 });
 
     expect(result.found).toBe(true);
     expect(result.failures[0].command).toContain("npm test");
@@ -116,7 +117,7 @@ describe("CodeMemoryCheckPriorFailuresTool", () => {
       resolution: "fixed via zod parse",
     });
 
-    const result = await newTool().check({ filePath: "/repo/src/foo.ts" });
+    const result = await newTool().check({ filePath: "/repo/src/foo.ts", conversationId: 1 });
 
     expect(result.found).toBe(false);
   });
@@ -124,7 +125,7 @@ describe("CodeMemoryCheckPriorFailuresTool", () => {
   it("takes the symbol-only path when no filePath/command is given", async () => {
     await seed({ symbol: "validateUser", filePath: "/repo/src/auth.ts" });
 
-    const result = await newTool().check({ symbol: "validateUser" });
+    const result = await newTool().check({ symbol: "validateUser", conversationId: 1 });
 
     expect(result.found).toBe(true);
     expect(result.failures[0].symbol).toBe("validateUser");
@@ -132,7 +133,7 @@ describe("CodeMemoryCheckPriorFailuresTool", () => {
   });
 
   it("returns a helpful reason when no target is provided", async () => {
-    const result = await newTool().check({});
+    const result = await newTool().check({ conversationId: 1 });
 
     expect(result.found).toBe(false);
     expect(result.reason).toMatch(/filePath|command|symbol/);
@@ -152,6 +153,7 @@ describe("CodeMemoryCheckPriorFailuresTool", () => {
     const result = await newTool().check({
       filePath: "/repo/src/hot.ts",
       limit: 10, // should be clamped to 5
+      conversationId: 1,
     });
 
     expect(result.failures.length).toBeLessThanOrEqual(5);
@@ -166,7 +168,7 @@ describe("CodeMemoryCheckPriorFailuresTool", () => {
       node.nodeId,
     ]);
 
-    const result = await newTool().check({ symbol: "staleSymbol" });
+    const result = await newTool().check({ symbol: "staleSymbol", conversationId: 1 });
 
     expect(result.found).toBe(false);
     expect(result.reason).toMatch(/confidence|No prior failures/);

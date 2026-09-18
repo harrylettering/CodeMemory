@@ -30,11 +30,12 @@ export class CodeMemoryCheckPriorFailuresTool {
             const toolInput = params.filePath
                 ? { file_path: params.filePath }
                 : { command: params.command };
-            const resp = await lookupForPreToolUse(this.memoryStore, toolName, toolInput, { limit });
+            const resp = await lookupForPreToolUse(this.memoryStore, toolName, toolInput, { limit, conversationId: params.conversationId });
             return mapResponse(resp, limit);
         }
         if (params.symbol) {
             const candidates = await this.memoryStore.findFailuresByAnchors({
+                conversationId: params.conversationId,
                 symbols: [params.symbol],
                 statuses: ["active"],
                 limit: limit + 4,

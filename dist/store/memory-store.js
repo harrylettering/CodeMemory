@@ -368,6 +368,11 @@ export class MemoryNodeStore {
         const statuses = uniqueStatuses(input.statuses ?? ["active"]);
         if (statuses.length === 0 || anchors.length === 0)
             return [];
+        // A session recalls only the failures it recorded. Unknown session looks
+        // nothing up rather than looking everything up: failing open is what makes
+        // a leak silent.
+        if (input.conversationId == null)
+            return [];
         const candidates = new Map();
         for (const anchor of anchors) {
             const normalized = normalizeTagValue(anchor.tagValue);
@@ -378,11 +383,12 @@ export class MemoryNodeStore {
            FROM memory_tags mt
            JOIN memory_nodes n ON n.nodeId = mt.nodeId
           WHERE n.kind = 'failure'
+            AND n.conversationId = ?
             AND n.status IN (${statusPlaceholders})
             AND mt.tagType = ?
             AND mt.tagValue = ?
           ORDER BY n.updatedAt DESC
-          LIMIT ?`, [...statuses, anchor.tagType, normalized, input.limit ?? 12]);
+          LIMIT ?`, [input.conversationId, ...statuses, anchor.tagType, normalized, input.limit ?? 12]);
             for (const row of rows) {
                 const node = mapNode(row);
                 const conversationBoost = input.conversationId && node.conversationId === input.conversationId ? 0.5 : 0;
@@ -747,10 +753,10 @@ export class MemoryNodeStore {
     async recordFailureLookup(input) {
         await this.db.run(`INSERT INTO failure_lookup_events (
          conversationId, sessionId, toolName, targetFile, targetCommand,
-         targetFileTag, targetCommandTag,
+         targetFileTag, targetCommandTag, unresolvedConversation,
          outcome, candidateCount, passedCount, topScore, surfacedNodeIds,
          source, createdAt
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, [
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, [
             input.conversationId ?? null,
             input.sessionId ?? null,
             input.toolName,
@@ -758,6 +764,7 @@ export class MemoryNodeStore {
             input.targetCommand ?? null,
             input.targetFileTag ?? null,
             input.targetCommandTag ?? null,
+            input.unresolvedConversation ? 1 : 0,
             input.outcome,
             input.candidateCount,
             input.passedCount,
