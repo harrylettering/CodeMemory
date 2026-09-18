@@ -73,16 +73,16 @@ getRelationsForNodes    关系缝合（两跳）             6 条 SQL
 
 ## 项目进度
 ```
-[========········] 57% 已完成
+[==========······] 71% 已完成
 ```
 
 ## 统计信息
 - 总任务数: 7
-- 已完成: 4
+- 已完成: 5
 - 执行中: 0
-- 待执行: 3
+- 待执行: 2
 - 失败: 0
-- 完成率: 57%
+- 完成率: 71%
 
 ---
 
@@ -195,8 +195,8 @@ codememory_expand_query  参数: query,tokenBudget,delegate,queryLanguage
 - **过程记录**: 第一版测试用了错误的返回字段名，两条断言在 `?? []` 上空转、假绿。
   改成断言真实的 `result.messages` 并加 `length > 0` 之后才拿到真实的 Red
 
-### ⏳ TASK-004: getRelationsForNodes 加会话过滤
-- **状态**: pending
+### ✅ TASK-004: getRelationsForNodes 加会话过滤
+- **状态**: completed
 - **描述**: 关系缝合的两跳查询加过滤；`relationConversationBonus` 在隔离后恒定，标记为待删并加注释说明原因
 - **预估时间**: 1 小时
 - **优先级**: 中
@@ -211,7 +211,15 @@ codememory_expand_query  参数: query,tokenBudget,delegate,queryLanguage
   - 风险描述: 实测关系缝合只贡献 14 条边，影响面小
   - 应对建议: 无
 - **回滚方案**: `git revert`
-- **交付物**: `src/store/memory-store.ts`, `src/memory-retrieval.ts`, `test/session-isolation.test.ts`
+- **完成时间**: 2026-09-19
+- **交付物**: `src/store/memory-store.ts`, `src/memory-retrieval.ts`, `test/session-isolation.test.ts`, `test/memory-store.test.ts`
+- **真实库验证**: conv1 返回 14 条边、端点属于别的会话 0；会话未知返回 0 条
+- **两端都要判**: 只判调用方点名的那一端，远端节点照样会被拉进本会话的上下文，
+  而缝合接下来干的正是这件事
+- **一个不能误伤的边**: `derivedFromSummary` 的 `toNodeId` 存的是 summaryId，不在 `memory_nodes` 里。
+  远端用内连接会把这类边静默丢掉，所以条件写成"远端不存在节点、或存在且同会话"
+- **`relationConversationBonus` 已失效**: 候选全部同会话后它对每一对都返回 0.2，不改变任何排序。
+  按计划只加注释不删，第二步若恢复跨会话候选，偏好逻辑要回到这里
 
 ### ⏳ TASK-005: 回归测试审计
 - **状态**: pending

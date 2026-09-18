@@ -105,3 +105,59 @@ describe("searchByPlan is bounded by conversation", () => {
     expect(found).toEqual([]);
   });
 });
+
+describe("relation stitching is bounded by conversation", () => {
+  it("does not traverse an edge that leaves the conversation", async () => {
+    await addDecision("decision-mine", MINE, "use option A");
+    await addDecision("decision-theirs", THEIRS, "use option B");
+    await store.addRelation({
+      fromNodeId: "decision-mine",
+      toNodeId: "decision-theirs",
+      relationType: "relatedTo",
+      confidence: 1,
+    });
+
+    const groups = await store.getRelationsForNodes(
+      ["decision-mine"],
+      "both",
+      MINE
+    );
+
+    // The edge exists; following it would pull a node from another session
+    // into this one's context, which is the leak in a different shape.
+    expect(groups.get("decision-mine")).toEqual([]);
+  });
+
+  it("still traverses an edge inside the conversation", async () => {
+    await addDecision("decision-one", MINE, "use option A");
+    await addDecision("decision-two", MINE, "use option A refined");
+    await store.addRelation({
+      fromNodeId: "decision-two",
+      toNodeId: "decision-one",
+      relationType: "supersedes",
+      confidence: 1,
+    });
+
+    const groups = await store.getRelationsForNodes(
+      ["decision-two"],
+      "both",
+      MINE
+    );
+
+    expect(groups.get("decision-two")).toHaveLength(1);
+  });
+
+  it("traverses nothing when the conversation is unknown", async () => {
+    await addDecision("decision-one", MINE, "use option A");
+    await addDecision("decision-two", MINE, "use option A refined");
+    await store.addRelation({
+      fromNodeId: "decision-two",
+      toNodeId: "decision-one",
+      relationType: "supersedes",
+      confidence: 1,
+    });
+
+    const groups = await store.getRelationsForNodes(["decision-two"], "both");
+    expect(groups.get("decision-two")).toEqual([]);
+  });
+});

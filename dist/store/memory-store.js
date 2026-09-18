@@ -114,24 +114,45 @@ export class MemoryNodeStore {
                ORDER BY createdAt DESC, relationId DESC`, [nodeId, nodeId]);
         return rows.map(mapRelation);
     }
-    async getRelationsForNodes(nodeIds, direction = "both") {
+    async getRelationsForNodes(nodeIds, direction = "both", conversationId) {
         const uniqueNodeIds = Array.from(new Set(nodeIds.map((nodeId) => nodeId.trim()).filter(Boolean)));
         const groups = new Map(uniqueNodeIds.map((nodeId) => [nodeId, []]));
         if (uniqueNodeIds.length === 0)
             return groups;
+        // Stitching follows edges to nodes the caller never asked for, so an edge
+        // that leaves the conversation is the same leak in a different shape.
+        // Unknown conversation traverses nothing.
+        if (conversationId == null)
+            return groups;
         const placeholders = uniqueNodeIds.map(() => "?").join(",");
+        // Both ends must belong to the conversation. Checking only the end the
+        // caller named would still pull the far node into this session's context,
+        // which is precisely what stitching then does with it.
+        //
+        // derivedFromSummary points at a summaryId that is not in memory_nodes, so
+        // an inner join on the far end would silently drop those edges. They are
+        // kept by allowing a far end that resolves to no node at all.
+        const inConversation = (col) => `(NOT EXISTS (SELECT 1 FROM memory_nodes fx WHERE fx.nodeId = r.${col})
+        OR EXISTS (SELECT 1 FROM memory_nodes fx
+                    WHERE fx.nodeId = r.${col} AND fx.conversationId = ?))`;
         const rows = direction === "from"
-            ? await this.db.all(`SELECT * FROM memory_relations
-             WHERE fromNodeId IN (${placeholders})
-             ORDER BY createdAt DESC, relationId DESC`, uniqueNodeIds)
+            ? await this.db.all(`SELECT r.* FROM memory_relations r
+             WHERE r.fromNodeId IN (${placeholders})
+               AND ${inConversation("fromNodeId")}
+               AND ${inConversation("toNodeId")}
+             ORDER BY r.createdAt DESC, r.relationId DESC`, [...uniqueNodeIds, conversationId, conversationId])
             : direction === "to"
-                ? await this.db.all(`SELECT * FROM memory_relations
-               WHERE toNodeId IN (${placeholders})
-               ORDER BY createdAt DESC, relationId DESC`, uniqueNodeIds)
-                : await this.db.all(`SELECT * FROM memory_relations
-               WHERE fromNodeId IN (${placeholders})
-                  OR toNodeId IN (${placeholders})
-               ORDER BY createdAt DESC, relationId DESC`, [...uniqueNodeIds, ...uniqueNodeIds]);
+                ? await this.db.all(`SELECT r.* FROM memory_relations r
+               WHERE r.toNodeId IN (${placeholders})
+                 AND ${inConversation("fromNodeId")}
+                 AND ${inConversation("toNodeId")}
+               ORDER BY r.createdAt DESC, r.relationId DESC`, [...uniqueNodeIds, conversationId, conversationId])
+                : await this.db.all(`SELECT r.* FROM memory_relations r
+               WHERE (r.fromNodeId IN (${placeholders})
+                   OR r.toNodeId IN (${placeholders}))
+                 AND ${inConversation("fromNodeId")}
+                 AND ${inConversation("toNodeId")}
+               ORDER BY r.createdAt DESC, r.relationId DESC`, [...uniqueNodeIds, ...uniqueNodeIds, conversationId, conversationId]);
         for (const row of rows) {
             const relation = mapRelation(row);
             if (direction === "from") {

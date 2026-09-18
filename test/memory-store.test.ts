@@ -338,9 +338,11 @@ describe("MemoryNodeStore", () => {
       confidence: 0.88,
     });
 
+    // Traversal is bounded by conversation now; the fixture seeds into 1.
     const relations = await memoryStore.getRelationsForNodes(
       ["task-batch", "decision-batch"],
-      "both"
+      "both",
+      1
     );
 
     expect(relations.get("task-batch")).toEqual(
