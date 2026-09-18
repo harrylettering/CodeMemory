@@ -1056,6 +1056,14 @@ export class MemoryNodeStore {
     // Unknown session returns nothing rather than everything. Two live
     // retrieval_events rows had a null conversationId and surfaced nodes
     // anyway; falling through to unscoped recall is what makes a leak silent.
+    //
+    // This guard and the SQL predicate below cover different cases: the guard
+    // covers a missing conversation, the predicate covers a present one whose
+    // nodes belong elsewhere. They overlap only on the missing case, where the
+    // predicate happens to hold too because node:sqlite normalizes undefined
+    // to NULL and `= NULL` is never true. Mutation-testing shows removing this
+    // guard alone breaks nothing today -- keep it anyway: relying on SQL NULL
+    // semantics for a boundary is one refactor away from being wrong.
     if (input.conversationId == null) return [];
 
     const tagQueries = plan.tagQueries.slice(0, 16);
