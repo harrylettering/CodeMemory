@@ -23,7 +23,11 @@ afterEach(async () => {
 });
 
 describe("MemoryNodeStore", () => {
-  it("matches Memory Nodes by RetrievalPlan tags and prefers current conversation", async () => {
+  // Was "prefers current conversation": decision-2 belonged to another
+  // conversation and was expected to be returned, ranked lower. Recall is now
+  // bounded rather than weighted, so it is not returned at all. The contract
+  // changed; the test did not break.
+  it("matches Memory Nodes by RetrievalPlan tags, within the conversation only", async () => {
     await memoryStore.upsertNode({
       nodeId: "decision-1",
       kind: "decision",
@@ -54,9 +58,10 @@ describe("MemoryNodeStore", () => {
     const plan = createFastRetrievalPlan("之前 src/auth/login.ts 的决策是什么");
     const results = await memoryStore.searchByPlan(plan, { conversationId: 2 });
 
-    expect(results.length).toBeGreaterThanOrEqual(2);
+    expect(results.length).toBeGreaterThanOrEqual(1);
     expect(results[0].node.nodeId).toBe("decision-1");
     expect(results[0].matchedTags.some((tag) => tag.tagType === "file")).toBe(true);
+    expect(results.map((r) => r.node.nodeId)).not.toContain("decision-2");
   });
 
   it("creates task / constraint nodes and prioritizes them for continuation prompts", async () => {

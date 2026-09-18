@@ -73,16 +73,16 @@ getRelationsForNodes    关系缝合（两跳）             6 条 SQL
 
 ## 项目进度
 ```
-[==··············] 14% 已完成
+[====············] 29% 已完成
 ```
 
 ## 统计信息
 - 总任务数: 7
-- 已完成: 1
+- 已完成: 2
 - 执行中: 0
-- 待执行: 6
+- 待执行: 5
 - 失败: 0
-- 完成率: 14%
+- 完成率: 29%
 
 ---
 
@@ -112,8 +112,8 @@ getRelationsForNodes    关系缝合（两跳）             6 条 SQL
 - **顺带发现**: 2 条 `retrieval_events` 的 `conversationId` 为 NULL，**且都召回了节点**。
   解析不出会话仍然返回结果，正是 TASK-003 要堵的退化路径，现在有了实证。
 
-### ⏳ TASK-002: searchByPlan 加会话过滤
-- **状态**: pending
+### ✅ TASK-002: searchByPlan 加会话过滤
+- **状态**: completed
 - **描述**: 标签召回的两条 SQL（tag 匹配、content LIKE 兜底）加 `AND n.conversationId = ?`，`conversationId` 从可选加权参数变为必需过滤条件
 - **预估时间**: 1.5 小时
 - **优先级**: 高
@@ -129,7 +129,15 @@ getRelationsForNodes    关系缝合（两跳）             6 条 SQL
   - 风险描述: `searchByPlan` 是记忆召回主入口，漏改一条 SQL 会留下静默泄漏
   - 应对建议: TASK-001 的脚本在本任务后立即跑一次，不等全部做完
 - **回滚方案**: `git revert` 单个 commit
-- **交付物**: `src/store/memory-store.ts`, `test/session-isolation.test.ts`
+- **完成时间**: 2026-09-19
+- **交付物**: `src/store/memory-store.ts`, `src/retrieval-plan.ts`, `test/session-isolation.test.ts`, `test/memory-store.test.ts`
+- **Red 证据**: 三条断言全部失败，`expected [ 'decision-mine', 'decision-theirs' ] to not include 'decision-theirs'`
+- **真实库验证**: conv1 / conv9 各召回 24 个，属于别的会话的均为 0；会话未知时召回 0
+- **顺带发现**: `RetrievalPlan.scope` 的 `preferCurrentConversation` 和 `allowCrossSessionFailures` 两个字段
+  **声明了、赋值了、从来没有任何地方读**（第三处"设计好没接上"的路）。已把 `allowCrossSessionFailures`
+  改为 `false` 与实际行为一致，边界由 store 无条件强制，不做成 per-plan 开关
+- **契约变更**: `memory-store.test.ts` 那条 `prefers current conversation` 改为 `within the conversation only`。
+  偏好变成了排他，是契约变了不是测试坏了，注释里写明了
 
 ### ⏳ TASK-003: findFailuresByAnchors 加会话过滤并打通热路径
 - **状态**: pending
