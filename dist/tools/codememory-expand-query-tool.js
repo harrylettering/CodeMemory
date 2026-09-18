@@ -5,6 +5,7 @@
  *
  * Exactly matches CodeMemory's `codememory_expand_query` tool.
  */
+import { resolveLiveConversationId } from "./codememory-conversation-scope.js";
 import { CodeMemoryExpansionDelegation } from "./codememory-expand-tool.delegation.js";
 import { RetrievalEngine } from "../retrieval.js";
 import { CodeMemoryContextAssembler } from "../assembler.js";
@@ -177,7 +178,7 @@ export class CodeMemoryExpandQueryTool {
 /**
  * Tool definition for Claude Code CLI
  */
-export async function createCodeMemoryExpandQueryTool(conversationStore, summaryStore, deps) {
+export async function createCodeMemoryExpandQueryTool(conversationStore, summaryStore, deps, getCurrentSessionId) {
     const tool = new CodeMemoryExpandQueryTool(conversationStore, summaryStore, deps);
     return {
         name: "codememory_expand_query",
@@ -205,7 +206,11 @@ export async function createCodeMemoryExpandQueryTool(conversationStore, summary
             required: ["query"],
         },
         async call(params) {
-            return tool.expandQuery(params);
+            // Scope comes from the live session, never from params.
+            const conversationId = await resolveLiveConversationId(conversationStore, getCurrentSessionId);
+            if (conversationId == null)
+                return { answer: "", sources: [], reason: "live session could not be resolved" };
+            return tool.expandQuery({ ...params, conversationId });
         },
     };
 }

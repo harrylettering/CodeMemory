@@ -73,16 +73,16 @@ getRelationsForNodes    关系缝合（两跳）             6 条 SQL
 
 ## 项目进度
 ```
-[======··········] 43% 已完成
+[========········] 57% 已完成
 ```
 
 ## 统计信息
 - 总任务数: 7
-- 已完成: 3
+- 已完成: 4
 - 执行中: 0
-- 待执行: 4
+- 待执行: 3
 - 失败: 0
-- 完成率: 43%
+- 完成率: 57%
 
 ---
 
@@ -166,8 +166,8 @@ getRelationsForNodes    关系缝合（两跳）             6 条 SQL
 - **反转的测试**: `injects across sessions (the whole point of cross-session recall)`
   → `does not inject a failure another session recorded`，注释写明是产品定义变了
 
-### ⏳ TASK-003b: 检索类工具统一注入 conversationId
-- **状态**: pending
+### ✅ TASK-003b: 检索类工具统一注入 conversationId
+- **状态**: completed
 - **描述**: `codememory_grep`、`codememory_expand_query`、`codememory_describe`、`codememory_expand` 四个工具在装配层接上 `getCurrentSessionId`，在 `call` 内部解析出 `conversationId` 并强制注入；schema 不暴露该参数
 - **预估时间**: 1.5 小时
 - **优先级**: 高
@@ -183,7 +183,17 @@ getRelationsForNodes    关系缝合（两跳）             6 条 SQL
   - 风险描述: 这批工具挂在 debug 开关后，容易被认为"不重要"而漏改；但当前环境该开关是开的
   - 应对建议: 测试不受开关影响，直接测工具对象
 - **回滚方案**: `git revert`
-- **交付物**: `src/plugin/index.ts`, `src/tools/codememory-grep-tool.ts`, `src/tools/codememory-expand-query-tool.ts`, `src/tools/codememory-describe-tool.ts`, `src/tools/codememory-expand-tool.ts`
+- **完成时间**: 2026-09-19
+- **交付物**: 上述五个文件，外加共享解析器 `codememory-conversation-scope.ts`、`test/tool-session-isolation.test.ts`
+- **schema 验证**（编译产物实测，四个工具全部未暴露）:
+```
+codememory_grep          参数: query,mode,scope,limit
+codememory_describe      参数: id
+codememory_expand        参数: summaryId,depth,includeMessages,tokenCap
+codememory_expand_query  参数: query,tokenBudget,delegate,queryLanguage
+```
+- **过程记录**: 第一版测试用了错误的返回字段名，两条断言在 `?? []` 上空转、假绿。
+  改成断言真实的 `result.messages` 并加 `length > 0` 之后才拿到真实的 Red
 
 ### ⏳ TASK-004: getRelationsForNodes 加会话过滤
 - **状态**: pending

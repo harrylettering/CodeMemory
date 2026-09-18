@@ -5,6 +5,7 @@
  *
  * Exactly matches CodeMemory's `codememory_grep` tool implementation.
  */
+import { resolveLiveConversationId } from "./codememory-conversation-scope.js";
 import { RetrievalEngine } from "../retrieval.js";
 export class CodeMemoryGrepTool {
     conversationStore;
@@ -95,7 +96,7 @@ export class CodeMemoryGrepTool {
 /**
  * Tool definition for Claude Code CLI
  */
-export async function createCodeMemoryGrepTool(conversationStore, summaryStore, deps) {
+export async function createCodeMemoryGrepTool(conversationStore, summaryStore, deps, getCurrentSessionId) {
     const tool = new CodeMemoryGrepTool(conversationStore, summaryStore, deps);
     return {
         name: "codememory_grep",
@@ -125,7 +126,13 @@ export async function createCodeMemoryGrepTool(conversationStore, summaryStore, 
             required: ["query", "mode", "scope"],
         },
         async call(params) {
-            return tool.grep(params);
+            // The scope comes from the live session, never from params -- anything
+            // the model sent under that key is overwritten here.
+            const conversationId = await resolveLiveConversationId(conversationStore, getCurrentSessionId);
+            if (conversationId == null) {
+                return { messages: [], summaries: [], totalMatches: 0, scope: params.scope };
+            }
+            return tool.grep({ ...params, conversationId });
         },
     };
 }

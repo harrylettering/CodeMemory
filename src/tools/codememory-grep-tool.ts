@@ -8,6 +8,7 @@
 
 import type { ConversationStore } from "../store/conversation-store.js";
 import type { SummaryStore } from "../store/summary-store.js";
+import { resolveLiveConversationId } from "./codememory-conversation-scope.js";
 import type { CodeMemoryDependencies } from "../types.js";
 import type { MessageSearchResult } from "../retrieval.js";
 import type { SummarySearchResult } from "../retrieval.js";
@@ -174,7 +175,8 @@ export class CodeMemoryGrepTool {
 export async function createCodeMemoryGrepTool(
   conversationStore: ConversationStore,
   summaryStore: SummaryStore,
-  deps: CodeMemoryDependencies
+  deps: CodeMemoryDependencies,
+  getCurrentSessionId?: () => string | undefined
 ): Promise<{
   name: string;
   description: string;
@@ -215,7 +217,16 @@ export async function createCodeMemoryGrepTool(
       required: ["query", "mode", "scope"],
     },
     async call(params: CodeMemoryGrepParams) {
-      return tool.grep(params);
+      // The scope comes from the live session, never from params -- anything
+      // the model sent under that key is overwritten here.
+      const conversationId = await resolveLiveConversationId(
+        conversationStore,
+        getCurrentSessionId
+      );
+      if (conversationId == null) {
+        return { messages: [], summaries: [], totalMatches: 0, scope: params.scope };
+      }
+      return tool.grep({ ...params, conversationId });
     },
   };
 }

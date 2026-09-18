@@ -8,6 +8,7 @@
 
 import type { ConversationStore } from "../store/conversation-store.js";
 import type { SummaryStore } from "../store/summary-store.js";
+import { resolveLiveConversationId } from "./codememory-conversation-scope.js";
 import type { CodeMemoryDependencies } from "../types.js";
 import { CodeMemoryExpansionDelegation } from "./codememory-expand-tool.delegation.js";
 import { RetrievalEngine } from "../retrieval.js";
@@ -255,7 +256,8 @@ export class CodeMemoryExpandQueryTool {
 export async function createCodeMemoryExpandQueryTool(
   conversationStore: ConversationStore,
   summaryStore: SummaryStore,
-  deps: CodeMemoryDependencies
+  deps: CodeMemoryDependencies,
+  getCurrentSessionId?: () => string | undefined
 ): Promise<{
   name: string;
   description: string;
@@ -294,7 +296,13 @@ export async function createCodeMemoryExpandQueryTool(
       required: ["query"],
     },
     async call(params: CodeMemoryExpandQueryParams) {
-      return tool.expandQuery(params);
+      // Scope comes from the live session, never from params.
+      const conversationId = await resolveLiveConversationId(
+        conversationStore,
+        getCurrentSessionId
+      );
+      if (conversationId == null) return { answer: "", sources: [], reason: "live session could not be resolved" };
+      return tool.expandQuery({ ...params, conversationId });
     },
   };
 }
