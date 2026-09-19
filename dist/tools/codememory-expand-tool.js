@@ -5,6 +5,7 @@
  *
  * Exactly matches CodeMemory's `codememory_expand` tool implementation.
  */
+import { resolveLiveConversationId } from "./codememory-conversation-scope.js";
 import { CodeMemoryExpansionEngine } from "../expansion.js";
 export class CodeMemoryExpandTool {
     conversationStore;
@@ -106,7 +107,7 @@ export class CodeMemoryExpandTool {
 /**
  * Tool definition for Claude Code CLI
  */
-export async function createCodeMemoryExpandTool(conversationStore, summaryStore, deps) {
+export async function createCodeMemoryExpandTool(conversationStore, summaryStore, deps, getCurrentSessionId) {
     const tool = new CodeMemoryExpandTool(conversationStore, summaryStore, deps);
     return {
         name: "codememory_expand",
@@ -134,7 +135,11 @@ export async function createCodeMemoryExpandTool(conversationStore, summaryStore
             required: ["summaryId"],
         },
         async call(params) {
-            return tool.expand(params);
+            // Scope comes from the live session, never from params.
+            const conversationId = await resolveLiveConversationId(conversationStore, getCurrentSessionId);
+            if (conversationId == null)
+                return { children: [], messages: [], truncated: false };
+            return tool.expand({ ...params, conversationId });
         },
     };
 }

@@ -484,7 +484,8 @@ export class MemoryNodeStore {
 
   async getRelationsForNodes(
     nodeIds: string[],
-    direction: "from" | "to" | "both" = "both"
+    direction: "from" | "to" | "both" = "both",
+    conversationId?: number
   ): Promise<Map<string, MemoryRelationRecord[]>> {
     const uniqueNodeIds = Array.from(
       new Set(nodeIds.map((nodeId) => nodeId.trim()).filter(Boolean))
@@ -493,29 +494,51 @@ export class MemoryNodeStore {
       uniqueNodeIds.map((nodeId) => [nodeId, []] as const)
     );
     if (uniqueNodeIds.length === 0) return groups;
+    // Stitching follows edges to nodes the caller never asked for, so an edge
+    // that leaves the conversation is the same leak in a different shape.
+    // Unknown conversation traverses nothing.
+    if (conversationId == null) return groups;
 
     const placeholders = uniqueNodeIds.map(() => "?").join(",");
+    // Both ends must belong to the conversation. Checking only the end the
+    // caller named would still pull the far node into this session's context,
+    // which is precisely what stitching then does with it.
+    //
+    // derivedFromSummary points at a summaryId that is not in memory_nodes, so
+    // an inner join on the far end would silently drop those edges. They are
+    // kept by allowing a far end that resolves to no node at all.
+    const inConversation = (col: string) =>
+      `(NOT EXISTS (SELECT 1 FROM memory_nodes fx WHERE fx.nodeId = r.${col})
+        OR EXISTS (SELECT 1 FROM memory_nodes fx
+                    WHERE fx.nodeId = r.${col} AND fx.conversationId = ?))`;
+
     const rows =
       direction === "from"
         ? await this.db.all(
-            `SELECT * FROM memory_relations
-             WHERE fromNodeId IN (${placeholders})
-             ORDER BY createdAt DESC, relationId DESC`,
-            uniqueNodeIds
+            `SELECT r.* FROM memory_relations r
+             WHERE r.fromNodeId IN (${placeholders})
+               AND ${inConversation("fromNodeId")}
+               AND ${inConversation("toNodeId")}
+             ORDER BY r.createdAt DESC, r.relationId DESC`,
+            [...uniqueNodeIds, conversationId, conversationId]
           )
         : direction === "to"
           ? await this.db.all(
-              `SELECT * FROM memory_relations
-               WHERE toNodeId IN (${placeholders})
-               ORDER BY createdAt DESC, relationId DESC`,
-              uniqueNodeIds
+              `SELECT r.* FROM memory_relations r
+               WHERE r.toNodeId IN (${placeholders})
+                 AND ${inConversation("fromNodeId")}
+                 AND ${inConversation("toNodeId")}
+               ORDER BY r.createdAt DESC, r.relationId DESC`,
+              [...uniqueNodeIds, conversationId, conversationId]
             )
           : await this.db.all(
-              `SELECT * FROM memory_relations
-               WHERE fromNodeId IN (${placeholders})
-                  OR toNodeId IN (${placeholders})
-               ORDER BY createdAt DESC, relationId DESC`,
-              [...uniqueNodeIds, ...uniqueNodeIds]
+              `SELECT r.* FROM memory_relations r
+               WHERE (r.fromNodeId IN (${placeholders})
+                   OR r.toNodeId IN (${placeholders}))
+                 AND ${inConversation("fromNodeId")}
+                 AND ${inConversation("toNodeId")}
+               ORDER BY r.createdAt DESC, r.relationId DESC`,
+              [...uniqueNodeIds, ...uniqueNodeIds, conversationId, conversationId]
             );
 
     for (const row of rows) {
@@ -828,6 +851,10 @@ export class MemoryNodeStore {
 
     const statuses = uniqueStatuses(input.statuses ?? ["active"]);
     if (statuses.length === 0 || anchors.length === 0) return [];
+    // A session recalls only the failures it recorded. Unknown session looks
+    // nothing up rather than looking everything up: failing open is what makes
+    // a leak silent.
+    if (input.conversationId == null) return [];
     const candidates = new Map<string, FailureAnchorCandidate>();
     for (const anchor of anchors) {
       const normalized = normalizeTagValue(anchor.tagValue);
@@ -838,12 +865,13 @@ export class MemoryNodeStore {
            FROM memory_tags mt
            JOIN memory_nodes n ON n.nodeId = mt.nodeId
           WHERE n.kind = 'failure'
+            AND n.conversationId = ?
             AND n.status IN (${statusPlaceholders})
             AND mt.tagType = ?
             AND mt.tagValue = ?
           ORDER BY n.updatedAt DESC
           LIMIT ?`,
-        [...statuses, anchor.tagType, normalized, input.limit ?? 12]
+        [input.conversationId, ...statuses, anchor.tagType, normalized, input.limit ?? 12]
       );
 
       for (const row of rows) {
@@ -1020,6 +1048,24 @@ export class MemoryNodeStore {
       wantedKinds?: WantedMemoryKind[];
     } = {}
   ): Promise<MemorySearchCandidate[]> {
+    // A session recalls only what it produced. Before this, conversationId
+    // reached scoring as a +0.2 bonus, which changes the order of results but
+    // not which results exist -- on a live database 46.8% of surfaced nodes
+    // came from a different session.
+    //
+    // Unknown session returns nothing rather than everything. Two live
+    // retrieval_events rows had a null conversationId and surfaced nodes
+    // anyway; falling through to unscoped recall is what makes a leak silent.
+    //
+    // This guard and the SQL predicate below cover different cases: the guard
+    // covers a missing conversation, the predicate covers a present one whose
+    // nodes belong elsewhere. They overlap only on the missing case, where the
+    // predicate happens to hold too because node:sqlite normalizes undefined
+    // to NULL and `= NULL` is never true. Mutation-testing shows removing this
+    // guard alone breaks nothing today -- keep it anyway: relying on SQL NULL
+    // semantics for a boundary is one refactor away from being wrong.
+    if (input.conversationId == null) return [];
+
     const tagQueries = plan.tagQueries.slice(0, 16);
     const wantedKinds = normalizeWantedKinds(input.wantedKinds ?? plan.wantedKinds);
     const maxRowsPerTag = Math.max(8, Math.ceil((input.limit ?? 24) / 2));
@@ -1029,7 +1075,7 @@ export class MemoryNodeStore {
       const normalized = normalizeTagValue(query.tagValue);
       if (!normalized) continue;
 
-      const params: any[] = [query.tagType, normalized];
+      const params: any[] = [query.tagType, normalized, input.conversationId];
       const kindClause =
         wantedKinds.length > 0
           ? `AND n.kind IN (${wantedKinds.map(() => "?").join(",")})`
@@ -1044,6 +1090,7 @@ export class MemoryNodeStore {
            JOIN memory_nodes n ON n.nodeId = mt.nodeId
           WHERE mt.tagType = ?
             AND mt.tagValue = ?
+            AND n.conversationId = ?
             AND n.status IN ('active', 'resolved')
             ${kindClause}
           ORDER BY mt.weight DESC, n.updatedAt DESC
@@ -1067,7 +1114,7 @@ export class MemoryNodeStore {
       const normalized = normalizeTagValue(query.text);
       if (!normalized) continue;
 
-      const params: any[] = [];
+      const params: any[] = [input.conversationId];
       const kindClause =
         wantedKinds.length > 0
           ? `AND n.kind IN (${wantedKinds.map(() => "?").join(",")})`
@@ -1076,10 +1123,14 @@ export class MemoryNodeStore {
       params.push(`%${escapeLikePattern(query.text)}%`);
       params.push(maxRowsPerText);
 
+      // The content fallback is a second query behind the same method. Bounding
+      // only the tag query above would leave a silent hole behind an identical
+      // API, which is the shape this whole change is fixing.
       const rows = await this.db.all(
         `SELECT n.*
            FROM memory_nodes n
-          WHERE n.status IN ('active', 'resolved')
+          WHERE n.conversationId = ?
+            AND n.status IN ('active', 'resolved')
             ${kindClause}
             AND n.content LIKE ? ESCAPE '\\'
           ORDER BY n.updatedAt DESC
@@ -1309,6 +1360,8 @@ export class MemoryNodeStore {
     /** Normalized forms, matching memory_tags, so this row can be joined. */
     targetFileTag?: string | null;
     targetCommandTag?: string | null;
+    /** The lookup never ran: the calling session had no conversation. */
+    unresolvedConversation?: boolean;
     outcome:
       | "injected"
       | "debounced"
@@ -1324,10 +1377,10 @@ export class MemoryNodeStore {
     await this.db.run(
       `INSERT INTO failure_lookup_events (
          conversationId, sessionId, toolName, targetFile, targetCommand,
-         targetFileTag, targetCommandTag,
+         targetFileTag, targetCommandTag, unresolvedConversation,
          outcome, candidateCount, passedCount, topScore, surfacedNodeIds,
          source, createdAt
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         input.conversationId ?? null,
         input.sessionId ?? null,
@@ -1336,6 +1389,7 @@ export class MemoryNodeStore {
         input.targetCommand ?? null,
         input.targetFileTag ?? null,
         input.targetCommandTag ?? null,
+        input.unresolvedConversation ? 1 : 0,
         input.outcome,
         input.candidateCount,
         input.passedCount,

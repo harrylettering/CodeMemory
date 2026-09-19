@@ -8,11 +8,17 @@
 
 import type { ConversationStore } from "../store/conversation-store.js";
 import type { SummaryStore, SummaryRecord } from "../store/summary-store.js";
+import { resolveLiveConversationId } from "./codememory-conversation-scope.js";
 import type { CodeMemoryDependencies } from "../types.js";
 import type { DescribeResult } from "../retrieval.js";
 import { RetrievalEngine } from "../retrieval.js";
 
 export interface CodeMemoryDescribeParams {
+  /**
+   * Conversation the lookup is bounded to. Injected by the wiring layer from
+   * the live session, never accepted from the model.
+   */
+  conversationId?: number;
   /** ID of the summary or file to describe */
   id: string;
 }
@@ -172,7 +178,8 @@ export class CodeMemoryDescribeTool {
 export async function createCodeMemoryDescribeTool(
   conversationStore: ConversationStore,
   summaryStore: SummaryStore,
-  deps: CodeMemoryDependencies
+  deps: CodeMemoryDependencies,
+  getCurrentSessionId?: () => string | undefined
 ): Promise<{
   name: string;
   description: string;
@@ -199,7 +206,13 @@ export async function createCodeMemoryDescribeTool(
       required: ["id"],
     },
     async call(params: CodeMemoryDescribeParams) {
-      return tool.describe(params);
+      // Scope comes from the live session, never from params.
+      const conversationId = await resolveLiveConversationId(
+        conversationStore,
+        getCurrentSessionId
+      );
+      if (conversationId == null) return { found: false, reason: "live session could not be resolved" };
+      return tool.describe({ ...params, conversationId });
     },
   };
 }

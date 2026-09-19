@@ -117,6 +117,7 @@ describe("Failure-node Symbol-Level Retrieval", () => {
 
     it("retrieves failures by exact symbol match", async () => {
       const candidates = await memoryStore.findFailuresByAnchors({
+        conversationId: 1,
         symbols: ["handleLogin"],
         statuses: ["active"],
       });
@@ -129,6 +130,7 @@ describe("Failure-node Symbol-Level Retrieval", () => {
 
     it("returns empty array for non-existent symbols", async () => {
       const candidates = await memoryStore.findFailuresByAnchors({
+        conversationId: 1,
         symbols: ["nonExistentFunction"],
         statuses: ["active"],
       });
@@ -137,6 +139,7 @@ describe("Failure-node Symbol-Level Retrieval", () => {
 
     it("scores symbol matches above the confidence floor", async () => {
       const candidates = await memoryStore.findFailuresByAnchors({
+        conversationId: 1,
         symbols: ["handleLogin"],
         statuses: ["active"],
       });
@@ -166,7 +169,7 @@ describe("Failure-node Symbol-Level Retrieval", () => {
     });
 
     it("returns symbol matches when querying by symbol", async () => {
-      const result = await checkTool.check({ symbol: "validateUserInput" });
+      const result = await checkTool.check({ symbol: "validateUserInput", conversationId: 1 });
       expect(result.found).toBe(true);
       expect(result.count).toBe(1);
       expect(result.failures[0].symbol).toBe("validateUserInput");
@@ -195,7 +198,7 @@ describe("Failure-node Symbol-Level Retrieval", () => {
         oldNode.nodeId,
       ]);
 
-      const result = await checkTool.check({ symbol: "oldFunction" });
+      const result = await checkTool.check({ symbol: "oldFunction", conversationId: 1 });
       expect(result.found).toBe(false);
       expect(result.reason).toContain("below confidence threshold");
     });
@@ -220,7 +223,7 @@ describe("Failure-node Symbol-Level Retrieval", () => {
     it("includes symbol matches when looking up by file path", async () => {
       const result = await lookupForPreToolUse(memoryStore, "Edit", {
         file_path: "/repo/src/utils/format.ts",
-      });
+      }, { conversationId: 1 });
       expect(result.shouldInject).toBe(true);
       expect(result.markdown).toContain("formatResponse");
       expect(result.reason).toBe("Found relevant prior failures");
@@ -241,7 +244,7 @@ describe("Failure-node Symbol-Level Retrieval", () => {
       });
       const result = await lookupForPreToolUse(memoryStore, "Bash", {
         command: "npm run test:payment",
-      });
+      }, { conversationId: 1 });
       expect(result.shouldInject).toBe(true);
       expect(result.markdown).toContain("processPayment");
     });
@@ -281,6 +284,7 @@ describe("Failure-node Symbol-Level Retrieval", () => {
 
     it("retrieves snake_case symbols for Python", async () => {
       const candidates = await memoryStore.findFailuresByAnchors({
+        conversationId: 1,
         symbols: ["get_user"],
         statuses: ["active"],
       });
@@ -291,6 +295,7 @@ describe("Failure-node Symbol-Level Retrieval", () => {
 
     it("retrieves camelCase symbols for TypeScript", async () => {
       const candidates = await memoryStore.findFailuresByAnchors({
+        conversationId: 1,
         symbols: ["getUser"],
         statuses: ["active"],
       });

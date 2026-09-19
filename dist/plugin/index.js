@@ -52,7 +52,7 @@ export default function createCodeMemoryPlugin() {
                 await createCodeMemoryCompactTool(engine, getCurrentSessionId),
             ];
             if (config.debugToolsEnabled) {
-                tools.push(await createCodeMemoryGrepTool(engine.getConversationStore(), engine.getSummaryStore(), deps), await createCodeMemoryDescribeTool(engine.getConversationStore(), engine.getSummaryStore(), deps), await createCodeMemoryExpandTool(engine.getConversationStore(), engine.getSummaryStore(), deps), await createCodeMemoryExpandQueryTool(engine.getConversationStore(), engine.getSummaryStore(), deps), await createCodeMemoryMemoryPendingTool(memoryStore), await createCodeMemoryMemoryLifecycleTool(memoryStore, lifecycleResolver));
+                tools.push(await createCodeMemoryGrepTool(engine.getConversationStore(), engine.getSummaryStore(), deps, getCurrentSessionId), await createCodeMemoryDescribeTool(engine.getConversationStore(), engine.getSummaryStore(), deps, getCurrentSessionId), await createCodeMemoryExpandTool(engine.getConversationStore(), engine.getSummaryStore(), deps, getCurrentSessionId), await createCodeMemoryExpandQueryTool(engine.getConversationStore(), engine.getSummaryStore(), deps, getCurrentSessionId), await createCodeMemoryMemoryPendingTool(memoryStore), await createCodeMemoryMemoryLifecycleTool(memoryStore, lifecycleResolver));
             }
             return { engine, tools };
         },

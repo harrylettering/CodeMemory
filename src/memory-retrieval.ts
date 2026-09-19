@@ -219,7 +219,8 @@ export class MemoryRetrievalEngine {
     );
     const relationGroups = await this.memoryStore.getRelationsForNodes(
       candidates.map((candidate) => candidate.node.nodeId),
-      "both"
+      "both",
+      conversationId
     );
 
     const rawRelations = new Map<
@@ -402,9 +403,12 @@ export class MemoryRetrievalEngine {
         ])
       )
     );
+    // The second hop is a separate call. Bounding only the first would leave
+    // the far half of the graph reachable in two steps instead of one.
     const secondHopGroups = await this.memoryStore.getRelationsForNodes(
       middleNodeIds,
-      "both"
+      "both",
+      conversationId
     );
     const secondHopNodeIds = Array.from(
       new Set(
@@ -802,6 +806,13 @@ function relationPriority(relationType: MemoryRelationRecord["relationType"]): n
   }
 }
 
+/**
+ * Dead since relation stitching became bounded: every candidate now belongs to
+ * the asking conversation, so this returns 0.2 for every pair and changes no
+ * ordering. Kept rather than deleted because promoting durable knowledge
+ * across sessions is a later step, and this is where the preference would go
+ * back if cross-session candidates ever return.
+ */
 function relationConversationBonus(
   fromNode: MemoryNodeRecord,
   toNode: MemoryNodeRecord,

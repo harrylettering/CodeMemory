@@ -747,6 +747,15 @@ export async function runCodeMemoryMigrations(db) {
       updatedAt TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
     )
   `);
+    // Migration 31: distinguish a lookup that ran and found nothing from one
+    // that never ran because the calling session could not be resolved.
+    //
+    // Both would otherwise be recorded as 'no_candidates', and they need
+    // opposite fixes: the first is a coverage problem, the second is a wiring
+    // problem that silently disables recall. A column rather than a new outcome
+    // value because the outcome CHECK cannot be extended without rebuilding the
+    // table, and the rebuild would cost more than it buys.
+    await addColumnIfMissing(db, "failure_lookup_events", "unresolvedConversation", "INTEGER NOT NULL DEFAULT 0");
     console.log(`[codememory] Database migrations completed successfully`);
 }
 /**

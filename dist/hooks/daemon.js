@@ -165,6 +165,7 @@ async function startDaemon(args) {
                     targetFile: response.diagnostics.targetFile,
                     targetCommand: response.diagnostics.targetCommand,
                     targetFileTag: response.diagnostics.targetFileTag,
+                    unresolvedConversation: response.diagnostics.unresolvedConversation,
                     targetCommandTag: response.diagnostics.targetCommandTag,
                     outcome,
                     candidateCount: response.diagnostics.candidateCount,
@@ -406,7 +407,20 @@ async function startDaemon(args) {
             req.on("end", async () => {
                 try {
                     const body = JSON.parse(Buffer.concat(chunks).toString("utf-8"));
-                    const response = await lookupForPreToolUse(memoryStore, body.toolName, body.toolInput);
+                    // Recall is bounded by conversation. Resolving it here rather than
+                    // inside the lookup keeps the scope decision in the layer that knows
+                    // which session is calling.
+                    let lookupConversationId;
+                    try {
+                        const conv = await conversationStore.getConversationForSession({
+                            sessionId,
+                        });
+                        lookupConversationId = conv?.conversationId;
+                    }
+                    catch {
+                        /* first tool call of a new session has no conversation yet */
+                    }
+                    const response = await lookupForPreToolUse(memoryStore, body.toolName, body.toolInput, { conversationId: lookupConversationId });
                     // Anti-flood: if we already warned about any of these targets
                     // recently, swallow the injection so the model doesn't get the
                     // same warning N times in a row on consecutive Edits to the

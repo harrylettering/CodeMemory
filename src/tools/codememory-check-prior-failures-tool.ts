@@ -33,6 +33,12 @@ export interface CodeMemoryCheckPriorFailuresParams {
   symbol?: string;
   /** Max records to return (default 3, max 5). */
   limit?: number;
+  /**
+   * Conversation the lookup is bounded to. Injected by the wiring layer from
+   * the live session, never accepted from the model -- a boundary the caller
+   * can choose is a boundary the caller can drop.
+   */
+  conversationId?: number;
 }
 
 export interface CodeMemoryCheckPriorFailuresResult {
@@ -62,13 +68,14 @@ export class CodeMemoryCheckPriorFailuresTool {
         this.memoryStore,
         toolName,
         toolInput,
-        { limit }
+        { limit, conversationId: params.conversationId }
       );
       return mapResponse(resp, limit);
     }
 
     if (params.symbol) {
       const candidates = await this.memoryStore.findFailuresByAnchors({
+        conversationId: params.conversationId,
         symbols: [params.symbol],
         statuses: ["active"],
         limit: limit + 4,

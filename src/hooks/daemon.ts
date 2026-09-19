@@ -221,6 +221,7 @@ async function startDaemon(args: string[]) {
           targetFile: response.diagnostics.targetFile,
           targetCommand: response.diagnostics.targetCommand,
           targetFileTag: response.diagnostics.targetFileTag,
+          unresolvedConversation: response.diagnostics.unresolvedConversation,
           targetCommandTag: response.diagnostics.targetCommandTag,
           outcome,
           candidateCount: response.diagnostics.candidateCount,
@@ -479,10 +480,23 @@ async function startDaemon(args: string[]) {
       req.on("end", async () => {
         try {
           const body = JSON.parse(Buffer.concat(chunks).toString("utf-8"));
+          // Recall is bounded by conversation. Resolving it here rather than
+          // inside the lookup keeps the scope decision in the layer that knows
+          // which session is calling.
+          let lookupConversationId: number | undefined;
+          try {
+            const conv = await conversationStore.getConversationForSession({
+              sessionId,
+            });
+            lookupConversationId = conv?.conversationId;
+          } catch {
+            /* first tool call of a new session has no conversation yet */
+          }
           const response = await lookupForPreToolUse(
             memoryStore,
             body.toolName,
-            body.toolInput
+            body.toolInput,
+            { conversationId: lookupConversationId }
           );
 
           // Anti-flood: if we already warned about any of these targets

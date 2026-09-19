@@ -75,22 +75,26 @@ export default function createCodeMemoryPlugin() {
           await createCodeMemoryGrepTool(
             engine.getConversationStore(),
             engine.getSummaryStore(),
-            deps
+            deps,
+            getCurrentSessionId
           ),
           await createCodeMemoryDescribeTool(
             engine.getConversationStore(),
             engine.getSummaryStore(),
-            deps
+            deps,
+            getCurrentSessionId
           ),
           await createCodeMemoryExpandTool(
             engine.getConversationStore(),
             engine.getSummaryStore(),
-            deps
+            deps,
+            getCurrentSessionId
           ),
           await createCodeMemoryExpandQueryTool(
             engine.getConversationStore(),
             engine.getSummaryStore(),
-            deps
+            deps,
+            getCurrentSessionId
           ),
           await createCodeMemoryMemoryPendingTool(memoryStore),
           await createCodeMemoryMemoryLifecycleTool(memoryStore, lifecycleResolver)

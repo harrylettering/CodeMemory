@@ -68,7 +68,7 @@ export class MemoryRetrievalEngine {
         }
         const remainingTokens = Math.min(tokenBudget, Math.max(120, Math.ceil(plan.recallPolicy.tokenBudget * 0.28)));
         const candidateMap = new Map(candidates.map((candidate) => [candidate.node.nodeId, candidate.node]));
-        const relationGroups = await this.memoryStore.getRelationsForNodes(candidates.map((candidate) => candidate.node.nodeId), "both");
+        const relationGroups = await this.memoryStore.getRelationsForNodes(candidates.map((candidate) => candidate.node.nodeId), "both", conversationId);
         const rawRelations = new Map();
         for (const candidate of candidates) {
             const relations = relationGroups.get(candidate.node.nodeId) ?? [];
@@ -195,7 +195,9 @@ export class MemoryRetrievalEngine {
             relation.fromNode.nodeId,
             relation.toNode.nodeId,
         ])));
-        const secondHopGroups = await this.memoryStore.getRelationsForNodes(middleNodeIds, "both");
+        // The second hop is a separate call. Bounding only the first would leave
+        // the far half of the graph reachable in two steps instead of one.
+        const secondHopGroups = await this.memoryStore.getRelationsForNodes(middleNodeIds, "both", conversationId);
         const secondHopNodeIds = Array.from(new Set(Array.from(secondHopGroups.values()).flatMap((relations) => relations.flatMap((relation) => [relation.fromNodeId, relation.toNodeId]))));
         const nodeMap = new Map((await this.memoryStore.getNodes(secondHopNodeIds))
             .filter((node) => node.status !== "stale")
@@ -499,6 +501,13 @@ function relationPriority(relationType) {
             return 0.9;
     }
 }
+/**
+ * Dead since relation stitching became bounded: every candidate now belongs to
+ * the asking conversation, so this returns 0.2 for every pair and changes no
+ * ordering. Kept rather than deleted because promoting durable knowledge
+ * across sessions is a later step, and this is where the preference would go
+ * back if cross-session candidates ever return.
+ */
 function relationConversationBonus(fromNode, toNode, conversationId) {
     if (!conversationId)
         return 0;
