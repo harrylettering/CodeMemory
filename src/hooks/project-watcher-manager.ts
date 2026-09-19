@@ -79,6 +79,11 @@ export class ProjectWatcher {
     this.watcher = createJsonlWatcher({ log: deps } as any, {
       watchPath: this.projectWatchPath,
       pollInterval: options.pollInterval || 2000,
+      // The watch path is the project's, shared by every session in it, while
+      // this process serves one. Without the scope each daemon read every
+      // transcript in the directory, so N sessions in a project parsed, scored
+      // and ingested each line N times.
+      sessionScope: options.sessionId,
     });
   }
 
