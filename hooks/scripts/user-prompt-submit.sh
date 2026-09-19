@@ -6,10 +6,17 @@
 # before it starts answering. Two paths, mirroring pre-tool-use.sh:
 #
 #   1. Daemon socket (preferred) — POST /retrieval/onPrompt
-#   2. (no fallback) — if the daemon is down we just emit a noop. The
-#      cold-start path doesn't make sense here: prompt-time retrieval
-#      with a node spawn would add 200ms to every keystroke-of-the-user
-#      latency, which is the wrong tradeoff. Hook absence is recoverable.
+#   2. Respawn and retry once — the daemon now exits when idle, so a session
+#      that goes quiet and comes back finds no socket. Without this, that
+#      session had no retrieval for the rest of its life. There is still no
+#      cold-start CLI path: a node spawn per prompt is the wrong trade, but
+#      bringing the daemon back once, on the prompt that noticed it was gone,
+#      pays for itself over every prompt after it.
+#
+# The respawn lives here rather than in pre-tool-use.sh on purpose.
+# UserPromptSubmit fires once per turn, before that turn's tools, so by the
+# time PreToolUse runs the daemon is already back; putting a spawn on the
+# per-tool-call path would risk the invariant that hooks never block tools.
 
 set -euo pipefail
 
@@ -41,10 +48,32 @@ if [ -z "$PROMPT" ]; then
 fi
 
 SOCKET_PATH="${HOME}/.claude/codememory-runtime/${SESSION_ID}.sock"
-if [ ! -S "$SOCKET_PATH" ] || ! command -v curl >/dev/null 2>&1; then
-  echo "[$(date -Iseconds)] no socket / no curl, skipping injection" >> "$LOG_FILE"
+
+if ! command -v curl >/dev/null 2>&1; then
+  echo "[$(date -Iseconds)] no curl, skipping injection" >> "$LOG_FILE"
   emit_noop
   exit 0
+fi
+
+if [ ! -S "$SOCKET_PATH" ]; then
+  # Budget is deliberately shorter than SessionStart's. This runs between the
+  # user pressing enter and the model starting, so a daemon that cannot come
+  # up quickly is not worth waiting for -- it will be retried next prompt, and
+  # nothing is lost meanwhile because read positions are durable.
+  CWD=$(printf '%s' "$INPUT" | jq -r '.cwd // ""')
+  if [ -z "${CLAUDE_PLUGIN_ROOT:-}" ]; then
+    echo "[$(date -Iseconds)] no socket and no CLAUDE_PLUGIN_ROOT" >> "$LOG_FILE"
+    emit_noop
+    exit 0
+  fi
+  if REASON=$("${CLAUDE_PLUGIN_ROOT}/hooks/scripts/ensure-daemon.sh" \
+        "$SESSION_ID" "$CWD" "${CODEMEMORY_RESPAWN_TIMEOUT:-1.5}" 2>>"$LOG_FILE"); then
+    echo "[$(date -Iseconds)] respawned daemon for $SESSION_ID" >> "$LOG_FILE"
+  else
+    echo "[$(date -Iseconds)] no socket and respawn failed: ${REASON:-unknown}" >> "$LOG_FILE"
+    emit_noop
+    exit 0
+  fi
 fi
 
 PAYLOAD=$(jq -nc --arg prompt "$PROMPT" '{prompt: $prompt}')

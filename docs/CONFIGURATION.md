@@ -72,6 +72,8 @@ When enabled, a single haiku call detects whether a newly marked decision implic
 | `CODEMEMORY_AUTO_SUPERSEDE_VIA_LLM` | `false` | Master switch for the LLM-as-judge auto-supersede path. |
 | `CODEMEMORY_AUTO_SUPERSEDE_MODEL` | _(unset)_ | Judge model. |
 | `CODEMEMORY_AUTO_SUPERSEDE_MAX_CANDIDATES` | `20` | Max active decisions the judge considers per call. |
+| `CODEMEMORY_DAEMON_IDLE_TIMEOUT_MS` | `1800000` (30 min) | Inactivity after which a daemon exits on its own. A hook talking to the socket or a line appearing in a transcript counts as activity. `0` disables it. SessionEnd is not a reliable teardown signal, so without this a daemon outlives its session until reboot. |
+| `CODEMEMORY_RESPAWN_TIMEOUT` | `1.5` | Seconds UserPromptSubmit waits for a respawned daemon. Deliberately shorter than the SessionStart budget: this runs between the user pressing enter and the model starting, and a daemon that cannot come up quickly is retried next prompt, losing nothing because read positions are durable. |
 | `CODEMEMORY_AUTO_SUPERSEDE_TIMEOUT_MS` | `8000` | Hard timeout for the judge call. |
 
 ## Removed in cleanup (no longer recognized)

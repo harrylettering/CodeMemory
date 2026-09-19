@@ -86,14 +86,27 @@ describe("hook scripts export the workspace root", () => {
   const read = (name: string) =>
     readFileSync(join(__dirname, "..", "hooks", "scripts", name), "utf-8");
 
-  it("session-start.sh exports it before changing directory", () => {
-    const script = read("session-start.sh");
+  it("ensure-daemon.sh exports it before changing directory", () => {
+    // The spawn moved out of session-start.sh once the daemon gained an idle
+    // exit and hooks had to be able to bring one back. The ordering rule
+    // travelled with it: the `cd` is what destroys the useful cwd.
+    const script = read("ensure-daemon.sh");
     const exportAt = script.indexOf("export CODEMEMORY_WORKSPACE_ROOT=");
     const cdAt = script.indexOf('cd "${CLAUDE_PLUGIN_ROOT}"');
     expect(exportAt).toBeGreaterThan(-1);
     expect(cdAt).toBeGreaterThan(-1);
     expect(exportAt).toBeLessThan(cdAt);
     expect(script).toContain('export CODEMEMORY_WORKSPACE_ROOT="$CWD"');
+  });
+
+  it("every path that spawns a daemon goes through that one script", () => {
+    // A second spawn site would be a second chance to forget the export, which
+    // is the whole way this bug happened the first time.
+    for (const name of ["session-start.sh", "user-prompt-submit.sh"]) {
+      const script = read(name);
+      expect(script).toContain("ensure-daemon.sh");
+      expect(script).not.toContain("daemon.js start");
+    }
   });
 
   it("pre-tool-use.sh exports it before the cold-start CLI runs", () => {
@@ -105,8 +118,12 @@ describe("hook scripts export the workspace root", () => {
     expect(exportAt).toBeLessThan(cliAt);
   });
 
-  it("both read the project directory from the hook payload", () => {
-    for (const name of ["session-start.sh", "pre-tool-use.sh"]) {
+  it("every spawning or reading path takes the project directory from the payload", () => {
+    for (const name of [
+      "session-start.sh",
+      "pre-tool-use.sh",
+      "user-prompt-submit.sh",
+    ]) {
       expect(read(name)).toMatch(/CWD=\$\(.*\.cwd \/\/ ""'\)/);
     }
   });

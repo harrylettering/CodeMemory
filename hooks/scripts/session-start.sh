@@ -40,6 +40,44 @@ echo "[codememory] Session start: $SESSION_ID in $CWD" >&2
 echo "[$(date -Iseconds)] Initializing database" >> "$LOG_FILE"
 "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/init-db.sh"
 
+# Reap the runtime files of daemons that are gone.
+#
+# Each session's .pid and .sock are named after a session id that never recurs,
+# so the existing same-id probe below can never clean up after a previous
+# session -- leaving the directory to accumulate one dead pair per session
+# forever.
+#
+# This only deletes files, and only when the process is demonstrably gone. It
+# never signals anything, so a recycled pid cannot lead it to kill an unrelated
+# process; the worst case is leaving a pair in place for another session.
+RUNTIME_DIR="${HOME}/.claude/codememory-runtime"
+if [ -d "$RUNTIME_DIR" ]; then
+    SWEPT=0
+    for pidfile in "$RUNTIME_DIR"/*.pid; do
+        [ -e "$pidfile" ] || continue
+        sid=$(basename "$pidfile" .pid)
+        [ "$sid" = "$SESSION_ID" ] && continue
+        pid=$(cat "$pidfile" 2>/dev/null | tr -d '[:space:]')
+        if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+            continue
+        fi
+        rm -f "$pidfile" "$RUNTIME_DIR/$sid.sock"
+        SWEPT=$((SWEPT + 1))
+    done
+    # A socket with no pid file beside it belongs to a daemon that died without
+    # running its teardown, which is the common case this exists for.
+    for sockfile in "$RUNTIME_DIR"/*.sock; do
+        [ -e "$sockfile" ] || continue
+        sid=$(basename "$sockfile" .sock)
+        [ "$sid" = "$SESSION_ID" ] && continue
+        [ -e "$RUNTIME_DIR/$sid.pid" ] && continue
+        rm -f "$sockfile"
+        SWEPT=$((SWEPT + 1))
+    done
+    [ "$SWEPT" -gt 0 ] && \
+        echo "[$(date -Iseconds)] Swept $SWEPT stale runtime file(s)" >> "$LOG_FILE"
+fi
+
 # Start JSONL watcher daemon
 echo "[$(date -Iseconds)] Starting JSONL watcher daemon" >> "$LOG_FILE"
 echo "[$(date -Iseconds)] CLAUDE_PLUGIN_ROOT=${CLAUDE_PLUGIN_ROOT:-}" >> "$LOG_FILE"
@@ -49,66 +87,26 @@ echo "[$(date -Iseconds)] CLAUDE_PLUGIN_ROOT=${CLAUDE_PLUGIN_ROOT:-}" >> "$LOG_F
 # within milliseconds, and reporting "initialized" over a dead process is how a
 # 100% daemon failure rate stayed invisible for months. The socket is the only
 # honest readiness signal: nothing can be looked up until it exists.
-DAEMON_HEALTH_TIMEOUT="${CODEMEMORY_DAEMON_HEALTH_TIMEOUT:-3}"
-DAEMON_HEALTH_POLL_INTERVAL="0.1"
+#
+# The spawn and the readiness poll now live in ensure-daemon.sh, because
+# SessionStart is no longer the only moment a daemon needs to exist: it exits
+# when idle, so a session that goes quiet and comes back has to be able to
+# bring one up again.
 DAEMON_HEALTHY="false"
 DAEMON_FAILURE_REASON=""
 
-if command -v node >/dev/null 2>&1 && [ -d "${CLAUDE_PLUGIN_ROOT}/dist" ]; then
-    echo "[$(date -Iseconds)] Node and dist found, starting daemon" >> "$LOG_FILE"
-    # File tags are qualified as <sha256(workspaceRoot)[:8]>:<relative-path>, and
-    # workspaceRoot falls back to process.cwd(). The `cd` below is required for
-    # the relative dist/ path to resolve, but it also makes cwd the plugin
-    # directory -- identical for every project on the machine. Without this
-    # export every repo hashed to the same key, so tags from different projects
-    # collided and absolute paths fell out of qualification entirely.
-    if [ -n "$CWD" ]; then
-        export CODEMEMORY_WORKSPACE_ROOT="$CWD"
-    fi
-    cd "${CLAUDE_PLUGIN_ROOT}"
-    # Fully detach daemon: close stdin, redirect stdout+stderr to log file,
-    # background, and disown. If stdout stays attached to the hook pipe,
-    # Claude Code will wait forever for EOF and hang every command.
-    nohup node --no-warnings dist/hooks/daemon.js start "$SESSION_ID" "$CWD" \
-        </dev/null >>"${LOG_DIR}/daemon.log" 2>&1 &
-    DAEMON_PID=$!
-    disown "$DAEMON_PID" 2>/dev/null || true
-    echo "[$(date -Iseconds)] Daemon spawned with PID $DAEMON_PID" >> "$LOG_FILE"
-
-    # Poll for readiness, but abandon the wait the instant the process dies so
-    # a crash-on-start costs ~100ms rather than the full timeout.
-    SOCKET_PATH="${HOME}/.claude/codememory-runtime/${SESSION_ID}.sock"
-    DAEMON_HEALTH_MAX_POLLS=$(awk -v t="$DAEMON_HEALTH_TIMEOUT" -v i="$DAEMON_HEALTH_POLL_INTERVAL" \
-        'BEGIN { n = int(t / i); print (n < 1 ? 1 : n) }')
-    POLL=0
-    while [ "$POLL" -lt "$DAEMON_HEALTH_MAX_POLLS" ]; do
-        if [ -S "$SOCKET_PATH" ]; then
-            DAEMON_HEALTHY="true"
-            break
-        fi
-        if ! kill -0 "$DAEMON_PID" 2>/dev/null; then
-            DAEMON_FAILURE_REASON="the daemon exited during startup"
-            break
-        fi
-        sleep "$DAEMON_HEALTH_POLL_INTERVAL"
-        POLL=$((POLL + 1))
-    done
-
-    if [ "$DAEMON_HEALTHY" = "true" ]; then
-        echo "[$(date -Iseconds)] Daemon healthy, socket at $SOCKET_PATH" >> "$LOG_FILE"
-    else
-        if [ -z "$DAEMON_FAILURE_REASON" ]; then
-            DAEMON_FAILURE_REASON="the daemon did not open its socket within ${DAEMON_HEALTH_TIMEOUT}s"
-        fi
-        echo "[$(date -Iseconds)] DAEMON UNHEALTHY: $DAEMON_FAILURE_REASON" >> "$LOG_FILE"
-        # The daemon's own stderr is the only place the real cause appears;
-        # copy the tail next to this failure so both live in one log.
-        echo "[$(date -Iseconds)] Last lines of daemon.log:" >> "$LOG_FILE"
-        tail -n 5 "${LOG_DIR}/daemon.log" 2>/dev/null >> "$LOG_FILE" || true
-    fi
+if DAEMON_FAILURE_REASON=$("${CLAUDE_PLUGIN_ROOT}/hooks/scripts/ensure-daemon.sh" \
+        "$SESSION_ID" "$CWD" "${CODEMEMORY_DAEMON_HEALTH_TIMEOUT:-3}" 2>>"$LOG_FILE"); then
+    DAEMON_HEALTHY="true"
+    DAEMON_FAILURE_REASON=""
+    echo "[$(date -Iseconds)] Daemon healthy" >> "$LOG_FILE"
 else
-    DAEMON_FAILURE_REASON="node or ${CLAUDE_PLUGIN_ROOT}/dist was not found"
-    echo "[$(date -Iseconds)] Node or dist not found! Node=$(command -v node 2>&1), dist=${CLAUDE_PLUGIN_ROOT}/dist" >> "$LOG_FILE"
+    [ -z "$DAEMON_FAILURE_REASON" ] && DAEMON_FAILURE_REASON="the daemon could not be started"
+    echo "[$(date -Iseconds)] DAEMON UNHEALTHY: $DAEMON_FAILURE_REASON" >> "$LOG_FILE"
+    # The daemon's own stderr is the only place the real cause appears; copy
+    # the tail next to this failure so both live in one log.
+    echo "[$(date -Iseconds)] Last lines of daemon.log:" >> "$LOG_FILE"
+    tail -n 5 "${LOG_DIR}/daemon.log" 2>/dev/null >> "$LOG_FILE" || true
 fi
 
 # Check if we have existing history for this project
