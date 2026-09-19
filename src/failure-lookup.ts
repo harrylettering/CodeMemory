@@ -49,6 +49,13 @@ export interface FailureLookupDiagnostics {
    */
   targetFileTag?: string;
   targetCommandTag?: string;
+  /**
+   * The lookup never ran because the calling session could not be resolved to
+   * a conversation. Distinct from `no_candidates`, which means the lookup ran
+   * and found nothing -- they need opposite fixes, and collapsing them is how
+   * a silent failure stays silent.
+   */
+  unresolvedConversation?: boolean;
   /** Nodes the anchor query returned, before scoring. */
   candidateCount: number;
   /** Of those, how many cleared MIN_CONFIDENCE. */
@@ -197,8 +204,26 @@ export async function lookupForPreToolUse(
   store: MemoryNodeStore,
   toolName: string,
   toolInput: any,
-  options: { limit?: number } = {}
+  options: { limit?: number; conversationId?: number } = {}
 ): Promise<FailureLookupResponse> {
+  // A session warns only about failures it recorded. Without a conversation
+  // there is nothing to scope the lookup to, and looking everything up instead
+  // is the failure mode this whole change closes.
+  if (options.conversationId == null) {
+    return {
+      shouldInject: false,
+      reason: "Calling session could not be resolved to a conversation",
+      failures: [],
+      diagnostics: {
+        outcome: "no_candidates",
+        unresolvedConversation: true,
+        candidateCount: 0,
+        passedCount: 0,
+        surfacedNodeIds: [],
+      },
+    };
+  }
+
   const targets = getTargetsFromInput(toolName, toolInput);
 
   if (!targets.filePath && !targets.command) {
@@ -216,6 +241,7 @@ export async function lookupForPreToolUse(
   }
 
   const candidates: FailureAnchorCandidate[] = await store.findFailuresByAnchors({
+    conversationId: options.conversationId,
     files: targets.filePath ? [targets.filePath] : [],
     commands: targets.command ? [targets.command] : [],
     statuses: ["active"],

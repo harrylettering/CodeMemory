@@ -43,6 +43,7 @@ export function resolveCodeMemoryConfig(env = process.env) {
         compactionDisableLlm: env.CODEMEMORY_COMPACTION_DISABLE_LLM === "true",
         exploredTargetWindowMs: parseInt(env.CODEMEMORY_EXPLORED_TARGET_WINDOW_MS || String(30 * 60 * 1000)),
         workspaceRoot: env.CODEMEMORY_WORKSPACE_ROOT || process.cwd(),
+        daemonIdleTimeoutMs: parseInt(env.CODEMEMORY_DAEMON_IDLE_TIMEOUT_MS || String(30 * 60 * 1000)),
         activeTaskStaleDays: parseInt(env.CODEMEMORY_ACTIVE_TASK_STALE_DAYS || "14"),
         autoSupersedeViaLlm: env.CODEMEMORY_AUTO_SUPERSEDE_VIA_LLM === "true",
         autoSupersedeModel: env.CODEMEMORY_AUTO_SUPERSEDE_MODEL || undefined,

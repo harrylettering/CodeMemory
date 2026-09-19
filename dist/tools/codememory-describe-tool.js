@@ -5,6 +5,7 @@
  *
  * Exactly matches CodeMemory's `codememory_describe` tool implementation.
  */
+import { resolveLiveConversationId } from "./codememory-conversation-scope.js";
 import { RetrievalEngine } from "../retrieval.js";
 export class CodeMemoryDescribeTool {
     conversationStore;
@@ -90,7 +91,7 @@ export class CodeMemoryDescribeTool {
 /**
  * Tool definition for Claude Code CLI
  */
-export async function createCodeMemoryDescribeTool(conversationStore, summaryStore, deps) {
+export async function createCodeMemoryDescribeTool(conversationStore, summaryStore, deps, getCurrentSessionId) {
     const tool = new CodeMemoryDescribeTool(conversationStore, summaryStore, deps);
     return {
         name: "codememory_describe",
@@ -106,7 +107,11 @@ export async function createCodeMemoryDescribeTool(conversationStore, summarySto
             required: ["id"],
         },
         async call(params) {
-            return tool.describe(params);
+            // Scope comes from the live session, never from params.
+            const conversationId = await resolveLiveConversationId(conversationStore, getCurrentSessionId);
+            if (conversationId == null)
+                return { found: false, reason: "live session could not be resolved" };
+            return tool.describe({ ...params, conversationId });
         },
     };
 }

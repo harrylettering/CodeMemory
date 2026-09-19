@@ -8,11 +8,17 @@
 
 import type { ConversationStore } from "../store/conversation-store.js";
 import type { SummaryStore } from "../store/summary-store.js";
+import { resolveLiveConversationId } from "./codememory-conversation-scope.js";
 import type { CodeMemoryDependencies } from "../types.js";
 import type { ExpandParams, ExpandResult } from "../expansion.js";
 import { CodeMemoryExpansionEngine } from "../expansion.js";
 
 export interface CodeMemoryExpandParams {
+  /**
+   * Conversation the lookup is bounded to. Injected by the wiring layer from
+   * the live session, never accepted from the model.
+   */
+  conversationId?: number;
   /** ID of the summary to expand */
   summaryId: string;
 
@@ -183,7 +189,8 @@ export class CodeMemoryExpandTool {
 export async function createCodeMemoryExpandTool(
   conversationStore: ConversationStore,
   summaryStore: SummaryStore,
-  deps: CodeMemoryDependencies
+  deps: CodeMemoryDependencies,
+  getCurrentSessionId?: () => string | undefined
 ): Promise<{
   name: string;
   description: string;
@@ -222,7 +229,13 @@ export async function createCodeMemoryExpandTool(
       required: ["summaryId"],
     },
     async call(params: CodeMemoryExpandParams) {
-      return tool.expand(params);
+      // Scope comes from the live session, never from params.
+      const conversationId = await resolveLiveConversationId(
+        conversationStore,
+        getCurrentSessionId
+      );
+      if (conversationId == null) return { children: [], messages: [], truncated: false };
+      return tool.expand({ ...params, conversationId });
     },
   };
 }

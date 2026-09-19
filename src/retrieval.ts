@@ -413,6 +413,7 @@ export class RetrievalEngine {
     const failuresSeen = new Map<string, FailureSurface>();
     if (this.memoryStore) {
       const candidates = await this.memoryStore.findFailuresByAnchors({
+        conversationId: input.conversationId,
         files: finalPivots.filePaths,
         commands: finalPivots.commands,
         symbols: finalPivots.symbols,

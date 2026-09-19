@@ -90,6 +90,12 @@ export interface CodeMemoryConfig {
    * Same-conversation only; cross-session is never auto-handled.
    */
   /**
+   * Milliseconds of inactivity after which a daemon exits on its own. 0
+   * disables it. SessionEnd is not a reliable teardown signal, so without
+   * this a daemon outlives its session until the machine is rebooted.
+   */
+  daemonIdleTimeoutMs: number;
+  /**
    * Days after which an untouched active task stops being treated as current.
    * A task has no terminal state of its own, so without this it is recalled
    * as the current goal forever.
@@ -139,6 +145,9 @@ export function resolveCodeMemoryConfig(env: NodeJS.ProcessEnv = process.env): C
       env.CODEMEMORY_EXPLORED_TARGET_WINDOW_MS || String(30 * 60 * 1000)
     ),
     workspaceRoot: env.CODEMEMORY_WORKSPACE_ROOT || process.cwd(),
+    daemonIdleTimeoutMs: parseInt(
+      env.CODEMEMORY_DAEMON_IDLE_TIMEOUT_MS || String(30 * 60 * 1000)
+    ),
     activeTaskStaleDays: parseInt(
       env.CODEMEMORY_ACTIVE_TASK_STALE_DAYS || "14"
     ),

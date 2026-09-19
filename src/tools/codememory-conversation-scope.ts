@@ -92,3 +92,26 @@ export function createConversationScopeUtils(
 ): CodeMemoryConversationScopeUtils {
   return new CodeMemoryConversationScopeUtils(conversationStore, summaryStore);
 }
+
+/**
+ * Resolve the live session to a conversation, for tools that must not be able
+ * to read outside it.
+ *
+ * Injected at the wiring layer rather than accepted as a parameter: these
+ * tools are model-callable, and a boundary the caller supplies is a boundary
+ * the caller can drop. Unresolved yields undefined, and every caller treats
+ * that as "search nothing" -- failing open is what makes a leak silent.
+ */
+export async function resolveLiveConversationId(
+  conversationStore: { getConversationForSession: (i: { sessionId: string }) => Promise<any> },
+  getCurrentSessionId?: () => string | undefined
+): Promise<number | undefined> {
+  const sessionId = getCurrentSessionId?.();
+  if (!sessionId) return undefined;
+  try {
+    const conv = await conversationStore.getConversationForSession({ sessionId });
+    return conv?.conversationId;
+  } catch {
+    return undefined;
+  }
+}

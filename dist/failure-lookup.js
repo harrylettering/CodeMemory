@@ -107,6 +107,23 @@ export function renderFailureMarkdown(failures) {
  * failures from prior sessions still surface, which is the whole point.
  */
 export async function lookupForPreToolUse(store, toolName, toolInput, options = {}) {
+    // A session warns only about failures it recorded. Without a conversation
+    // there is nothing to scope the lookup to, and looking everything up instead
+    // is the failure mode this whole change closes.
+    if (options.conversationId == null) {
+        return {
+            shouldInject: false,
+            reason: "Calling session could not be resolved to a conversation",
+            failures: [],
+            diagnostics: {
+                outcome: "no_candidates",
+                unresolvedConversation: true,
+                candidateCount: 0,
+                passedCount: 0,
+                surfacedNodeIds: [],
+            },
+        };
+    }
     const targets = getTargetsFromInput(toolName, toolInput);
     if (!targets.filePath && !targets.command) {
         return {
@@ -122,6 +139,7 @@ export async function lookupForPreToolUse(store, toolName, toolInput, options = 
         };
     }
     const candidates = await store.findFailuresByAnchors({
+        conversationId: options.conversationId,
         files: targets.filePath ? [targets.filePath] : [],
         commands: targets.command ? [targets.command] : [],
         statuses: ["active"],

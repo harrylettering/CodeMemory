@@ -12,6 +12,7 @@ import { resolveCodeMemoryConfig } from "./db/config.js";
 import { createCodeMemoryDatabaseConnection } from "./db/connection.js";
 import { createMemoryNodeStore } from "./store/memory-store.js";
 import { lookupForPreToolUse } from "./failure-lookup.js";
+import { ConversationStore } from "./store/conversation-store.js";
 
 function parseInputArg(arg: string): any {
   try {
@@ -35,7 +36,22 @@ async function main() {
     const memoryStore = createMemoryNodeStore(db);
 
     const toolInput = parseInputArg(rawToolInput);
-    const response = await lookupForPreToolUse(memoryStore, toolName, toolInput);
+
+    // The cold path receives only a session id, so it has to resolve the
+    // conversation itself. Unresolved means no lookup rather than an unscoped
+    // one -- the degraded path must not be the permissive one.
+    const conversationStore = new ConversationStore(db);
+    let conversationId: number | undefined;
+    try {
+      const conv = await conversationStore.getConversationForSession({ sessionId });
+      conversationId = conv?.conversationId;
+    } catch {
+      /* no conversation for this session yet */
+    }
+
+    const response = await lookupForPreToolUse(memoryStore, toolName, toolInput, {
+      conversationId,
+    });
 
     // The cold path runs whenever the daemon is down, so leaving it
     // uninstrumented would make recall look worse than it is exactly when the
@@ -47,6 +63,7 @@ async function main() {
         targetFile: response.diagnostics.targetFile,
         targetCommand: response.diagnostics.targetCommand,
         targetFileTag: response.diagnostics.targetFileTag,
+        unresolvedConversation: response.diagnostics.unresolvedConversation,
         targetCommandTag: response.diagnostics.targetCommandTag,
         outcome: response.diagnostics.outcome,
         candidateCount: response.diagnostics.candidateCount,

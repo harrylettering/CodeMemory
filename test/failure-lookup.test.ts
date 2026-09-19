@@ -83,11 +83,16 @@ describe("lookupForPreToolUse", () => {
     await seed();
     const memoryStore = createMemoryNodeStore(db);
 
-    const response = await lookupForPreToolUse(memoryStore, "Edit", {
+    const response = await lookupForPreToolUse(
+      memoryStore,
+      "Edit",
+      {
       file_path: "/repo/src/foo.ts",
       old_string: "x",
       new_string: "y",
-    });
+    },
+      { conversationId: 1 }
+    );
 
     expect(response.shouldInject).toBe(true);
     expect(response.failures).toHaveLength(1);
@@ -96,24 +101,69 @@ describe("lookupForPreToolUse", () => {
     expect(response.markdown).toContain("type_error");
   });
 
-  it("injects across sessions (the whole point of cross-session recall)", async () => {
-    await seed({ sessionId: "sess-A" });
+  // Was "injects across sessions (the whole point of cross-session recall)".
+  // That named the old product definition. A session now recalls only what it
+  // produced: on the live database 46.8% of surfaced nodes came from somewhere
+  // else, and wrong context costs more than missing context. Promoting durable
+  // failures across sessions is a later step with a human in the loop.
+  it("does not inject a failure another session recorded", async () => {
+    await seed({ conversationId: 1, sessionId: "sess-A" });
     const memoryStore = createMemoryNodeStore(db);
 
+    const response = await lookupForPreToolUse(
+      memoryStore,
+      "Edit",
+      { file_path: "/repo/src/foo.ts" },
+      { conversationId: 2 }
+    );
+
+    expect(response.shouldInject).toBe(false);
+    expect(response.failures).toHaveLength(0);
+  });
+
+  it("still injects a failure this session recorded", async () => {
+    await seed({ conversationId: 1, sessionId: "sess-A" });
+    const memoryStore = createMemoryNodeStore(db);
+
+    const response = await lookupForPreToolUse(
+      memoryStore,
+      "Edit",
+      { file_path: "/repo/src/foo.ts" },
+      { conversationId: 1 }
+    );
+
+    expect(response.shouldInject).toBe(true);
+  });
+
+  it("looks nothing up when the conversation cannot be resolved", async () => {
+    // Failing open here is what makes a leak silent, and two live rows show it
+    // happening: a null conversationId that surfaced nodes anyway.
+    await seed({ conversationId: 1, sessionId: "sess-A" });
+    const memoryStore = createMemoryNodeStore(db);
+
+    // Deliberately unscoped: this is the case being guarded.
     const response = await lookupForPreToolUse(memoryStore, "Edit", {
       file_path: "/repo/src/foo.ts",
     });
 
-    expect(response.shouldInject).toBe(true);
+    expect(response.shouldInject).toBe(false);
+    expect(response.diagnostics?.unresolvedConversation).toBe(true);
+    // Distinct from a lookup that ran and found nothing.
+    expect(response.diagnostics?.candidateCount).toBe(0);
   });
 
   it("does NOT inject for unrelated file paths", async () => {
     await seed();
     const memoryStore = createMemoryNodeStore(db);
 
-    const response = await lookupForPreToolUse(memoryStore, "Edit", {
+    const response = await lookupForPreToolUse(
+      memoryStore,
+      "Edit",
+      {
       file_path: "/repo/src/unrelated.ts",
-    });
+    },
+      { conversationId: 1 }
+    );
 
     expect(response.shouldInject).toBe(false);
     expect(response.failures).toHaveLength(0);
@@ -129,9 +179,14 @@ describe("lookupForPreToolUse", () => {
     });
     const memoryStore = createMemoryNodeStore(db);
 
-    const response = await lookupForPreToolUse(memoryStore, "Bash", {
+    const response = await lookupForPreToolUse(
+      memoryStore,
+      "Bash",
+      {
       command: "npm test",
-    });
+    },
+      { conversationId: 1 }
+    );
 
     expect(response.shouldInject).toBe(true);
     expect(response.markdown).toContain("npm test");
@@ -147,9 +202,14 @@ describe("lookupForPreToolUse", () => {
     });
     expect((await memoryStore.getNode(node.nodeId))?.status).toBe("resolved");
 
-    const response = await lookupForPreToolUse(memoryStore, "Edit", {
+    const response = await lookupForPreToolUse(
+      memoryStore,
+      "Edit",
+      {
       file_path: "/repo/src/foo.ts",
-    });
+    },
+      { conversationId: 1 }
+    );
 
     expect(response.shouldInject).toBe(false);
   });
@@ -160,9 +220,14 @@ describe("symbol-aware retrieval", () => {
     await seed({ symbol: "validateUser" });
     const memoryStore = createMemoryNodeStore(db);
 
-    const response = await lookupForPreToolUse(memoryStore, "Edit", {
+    const response = await lookupForPreToolUse(
+      memoryStore,
+      "Edit",
+      {
       file_path: "/repo/src/foo.ts",
-    });
+    },
+      { conversationId: 1 }
+    );
     expect(response.shouldInject).toBe(true);
     expect(response.markdown).toContain("validateUser");
     expect(response.markdown).toContain("::");
@@ -180,9 +245,14 @@ describe("confidence threshold", () => {
     });
     const memoryStore = createMemoryNodeStore(db);
 
-    const response = await lookupForPreToolUse(memoryStore, "Bash", {
+    const response = await lookupForPreToolUse(
+      memoryStore,
+      "Bash",
+      {
       command: "git status",
-    });
+    },
+      { conversationId: 1 }
+    );
 
     expect(response.shouldInject).toBe(false);
   });
@@ -197,9 +267,14 @@ describe("confidence threshold", () => {
     });
     const memoryStore = createMemoryNodeStore(db);
 
-    const response = await lookupForPreToolUse(memoryStore, "Bash", {
+    const response = await lookupForPreToolUse(
+      memoryStore,
+      "Bash",
+      {
       command: "ls",
-    });
+    },
+      { conversationId: 1 }
+    );
 
     expect(response.shouldInject).toBe(false);
   });
@@ -214,9 +289,14 @@ describe("confidence threshold", () => {
     });
     const memoryStore = createMemoryNodeStore(db);
 
-    const response = await lookupForPreToolUse(memoryStore, "Bash", {
+    const response = await lookupForPreToolUse(
+      memoryStore,
+      "Bash",
+      {
       command: "npm test",
-    });
+    },
+      { conversationId: 1 }
+    );
 
     expect(response.shouldInject).toBe(true);
   });
@@ -277,9 +357,14 @@ describe("time-decay", () => {
     ]);
 
     const memoryStore = createMemoryNodeStore(db);
-    const response = await lookupForPreToolUse(memoryStore, "Edit", {
+    const response = await lookupForPreToolUse(
+      memoryStore,
+      "Edit",
+      {
       file_path: "/repo/src/foo.ts",
-    });
+    },
+      { conversationId: 1 }
+    );
 
     expect(response.shouldInject).toBe(false);
     expect(response.reason).toMatch(/below confidence/i);

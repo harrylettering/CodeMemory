@@ -155,6 +155,8 @@ describe("RetrievalEngine.retrieveForPrompt", () => {
 
     const result = await engine.retrieveForPrompt({
       prompt: "Please touch src/auth/login.ts again and retry",
+      // Recall is bounded by conversation now; the fixture seeds into 1.
+      conversationId: 1,
     });
 
     expect(result.pivots.filePaths).toContain("src/auth/login.ts");
@@ -228,6 +230,7 @@ describe("RetrievalEngine.retrieveForPrompt", () => {
     const result = await engine.retrieveForPrompt({
       prompt: "edit src/hot.ts again",
       failureLimit: 1,
+      conversationId: 1,
     });
 
     expect(result.failures).toHaveLength(1);

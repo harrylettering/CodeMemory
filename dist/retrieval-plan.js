@@ -211,8 +211,13 @@ export function createFastRetrievalPlan(prompt) {
         },
         wantedKinds,
         scope: {
+            // Both fields were declared, set, and never read by anything. They are
+            // now set to match reality: the conversation boundary is enforced in the
+            // store, unconditionally, not negotiated per plan. Left in place because
+            // promoting durable knowledge across sessions is a later step that will
+            // need somewhere to say so.
             preferCurrentConversation: true,
-            allowCrossSessionFailures: true,
+            allowCrossSessionFailures: false,
         },
         queryVariants,
         tagQueries,
