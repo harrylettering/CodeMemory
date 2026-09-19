@@ -74,6 +74,7 @@ When enabled, a single haiku call detects whether a newly marked decision implic
 | `CODEMEMORY_AUTO_SUPERSEDE_MAX_CANDIDATES` | `20` | Max active decisions the judge considers per call. |
 | `CODEMEMORY_DAEMON_IDLE_TIMEOUT_MS` | `1800000` (30 min) | Inactivity after which a daemon exits on its own. A hook talking to the socket or a line appearing in a transcript counts as activity. `0` disables it. SessionEnd is not a reliable teardown signal, so without this a daemon outlives its session until reboot. |
 | `CODEMEMORY_RESPAWN_TIMEOUT` | `1.5` | Seconds UserPromptSubmit waits for a respawned daemon. Deliberately shorter than the SessionStart budget: this runs between the user pressing enter and the model starting, and a daemon that cannot come up quickly is retried next prompt, losing nothing because read positions are durable. |
+| `CODEMEMORY_ACTIVE_TASK_STALE_DAYS` | `14` | Days after which an untouched active task is marked stale. Tasks have no terminal state of their own, so without this a finished task is recalled as the current goal forever. A task retrieval keeps using is exempt. |
 | `CODEMEMORY_AUTO_SUPERSEDE_TIMEOUT_MS` | `8000` | Hard timeout for the judge call. |
 
 ## Removed in cleanup (no longer recognized)
