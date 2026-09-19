@@ -339,6 +339,7 @@ export class CodeMemoryJsonlWatcher {
             : Date.now();
         return {
             id: raw.uuid ?? `${raw.sessionId ?? "unknown"}-${ts}`,
+            sourceUuid: typeof raw.uuid === "string" && raw.uuid ? raw.uuid : undefined,
             type: raw.type,
             role: msg.role ?? raw.type,
             content,

@@ -30,6 +30,16 @@ export type RawMessagePart =
 
 export interface JsonlMessage {
   id: string;
+  /**
+   * The transcript line's own uuid, absent when the line has none.
+   *
+   * Deliberately separate from `id`, which falls back to a synthesised
+   * `<sessionId>-<timestamp>` when the uuid is missing. That fallback is fine
+   * as an identifier and wrong as a dedup key: two lines in the same
+   * millisecond would collapse into one, and dropping a real message is worse
+   * than storing a duplicate.
+   */
+  sourceUuid?: string;
   type: string;
   content: string;
   role: string;
@@ -414,6 +424,7 @@ export class CodeMemoryJsonlWatcher {
 
     return {
       id: raw.uuid ?? `${raw.sessionId ?? "unknown"}-${ts}`,
+      sourceUuid: typeof raw.uuid === "string" && raw.uuid ? raw.uuid : undefined,
       type: raw.type,
       role: msg.role ?? raw.type,
       content,
