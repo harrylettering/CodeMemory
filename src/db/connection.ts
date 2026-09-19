@@ -871,6 +871,32 @@ export async function runCodeMemoryMigrations(db: any): Promise<void> {
   );
 
 
+  // Migration 32: let the database refuse a line it has already stored.
+  //
+  // The watcher observes a project directory and filters by extension, not by
+  // session, while the daemon owning it is per-session. Two sessions in one
+  // project means two processes reading every transcript in it. Nothing
+  // stopped the second read from landing: messageId is an AUTOINCREMENT
+  // primary key with no relationship to the line it came from.
+  //
+  // Measured live: conversation 11 held 910 rows from a 776-line transcript,
+  // with 138 groups of byte-identical content at evenly spaced seq values.
+  //
+  // Scoped by conversation rather than global. A re-import purges and rebuilds
+  // one conversation, and a subagent transcript is read by the session that
+  // dispatched it; neither should be blocked by a row belonging elsewhere.
+  //
+  // Nullable on purpose. SQLite treats NULLs in a unique index as distinct, so
+  // rows that predate this column -- and the metadata lines that carry no uuid
+  // and never become messages anyway -- are left alone rather than colliding.
+  await addColumnIfMissing(db, "conversation_messages", "sourceUuid", "TEXT");
+
+  await db.exec(`
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_conversation_messages_source
+      ON conversation_messages(conversationId, sourceUuid)
+      WHERE sourceUuid IS NOT NULL
+  `);
+
   console.log(`[codememory] Database migrations completed successfully`);
 }
 

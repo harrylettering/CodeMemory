@@ -743,6 +743,9 @@ async function startDaemon(args: string[]) {
           tokenCount,
           tier: score.tier,
           tags: score.tags,
+          // Lets the store refuse a line another daemon watching the same
+          // project directory has already stored.
+          sourceUuid: message.sourceUuid,
           parts: [{
             partType: "text",
             textContent: score.content,

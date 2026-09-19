@@ -130,8 +130,38 @@ export class ConversationStore {
     tier?: "S" | "M" | "L" | "N";
     /** Filter/Score tags (e.g. ["mutation", "exec"]). */
     tags?: string[];
+    /**
+     * uuid of the transcript line this row came from, when it has one.
+     * Two processes reading the same project directory would otherwise both
+     * store it, and messageId is an AUTOINCREMENT key that cannot collide.
+     */
+    sourceUuid?: string;
   }): Promise<MessageRecord> {
     const now = new Date().toISOString();
+
+    // Already stored, by this process or another one watching the same
+    // directory. Return the original rather than failing: ingestion threads
+    // messageId into fix-attempt tracking and telemetry, so a repeat has to
+    // be a no-op, not an aborted ingest.
+    if (params.sourceUuid) {
+      const existing = await this.db.get(
+        `SELECT * FROM conversation_messages
+          WHERE conversationId = ? AND sourceUuid = ?`,
+        [params.conversationId, params.sourceUuid]
+      );
+      if (existing) {
+        return {
+          messageId: existing.messageId,
+          conversationId: existing.conversationId,
+          seq: existing.seq,
+          role: existing.role,
+          content: existing.content,
+          tokenCount: existing.tokenCount,
+          createdAt: existing.createdAt,
+        };
+      }
+    }
+
     const maxSeqResult = await this.db.get(
       "SELECT MAX(seq) as maxSeq FROM conversation_messages WHERE conversationId = ?",
       params.conversationId
@@ -145,16 +175,42 @@ export class ConversationStore {
     const tagsJson =
       params.tags && params.tags.length > 0 ? JSON.stringify(params.tags) : null;
 
-    const result = await this.db.run(`
-      INSERT INTO conversation_messages (
-        conversationId, seq, role, content, tokenCount, createdAt, tier, tags
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    `, [
-      params.conversationId, seq, params.role, params.content,
-      params.tokenCount, now, tier, tagsJson
-    ]);
-
-    const messageId = result.lastID;
+    let messageId: number;
+    try {
+      const result = await this.db.run(`
+        INSERT INTO conversation_messages (
+          conversationId, seq, role, content, tokenCount, createdAt, tier, tags,
+          sourceUuid
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `, [
+        params.conversationId, seq, params.role, params.content,
+        params.tokenCount, now, tier, tagsJson, params.sourceUuid ?? null
+      ]);
+      messageId = result.lastID;
+    } catch (error) {
+      // The check above has a window: two daemons watching the same project
+      // directory can both find no row and both insert. Within one process
+      // dispatch is sequential, so this only fires across processes -- which
+      // is the case this whole change exists for. The index is the authority;
+      // the check is only there to avoid the exception on the common path.
+      const existing = params.sourceUuid
+        ? await this.db.get(
+            `SELECT * FROM conversation_messages
+              WHERE conversationId = ? AND sourceUuid = ?`,
+            [params.conversationId, params.sourceUuid]
+          )
+        : null;
+      if (!existing) throw error;
+      return {
+        messageId: existing.messageId,
+        conversationId: existing.conversationId,
+        seq: existing.seq,
+        role: existing.role,
+        content: existing.content,
+        tokenCount: existing.tokenCount,
+        createdAt: existing.createdAt,
+      };
+    }
 
     for (const part of params.parts) {
       await this.db.run(`
