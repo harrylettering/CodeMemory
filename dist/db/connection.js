@@ -720,6 +720,33 @@ export async function runCodeMemoryMigrations(db) {
       runId, chunkIndex
     )
   `);
+    // Migration 30: Persist how far each transcript has been read.
+    //
+    // The watcher's offset map is process-local. A restart therefore had two
+    // options, both lossy. Rewinding to 0 re-emitted every prefix, and since
+    // nothing dedupes on the way in, a static 10-line transcript became 10 rows,
+    // then 20, then 30. Seeding to the end of the file instead (the mitigation
+    // that shipped) silently drops everything written while the daemon was down.
+    //
+    // That second cost is paid on every `--resume`, every crash recovery, and
+    // every plugin upgrade, and it is about to be paid far more often once the
+    // daemon is allowed to exit when idle and be respawned on demand. An offset
+    // that survives the process makes a restart a seamless continuation instead
+    // of a choice between duplicating and losing.
+    //
+    // Keyed by file, not conversation. conversation_bootstrap_state was designed
+    // for this and never wired up, but its conversationId primary key cannot
+    // hold the several transcripts one conversation owns -- a main file plus one
+    // per subagent -- and offsets must load before any conversation row exists.
+    await db.exec(`
+    CREATE TABLE IF NOT EXISTS watcher_offsets (
+      filePath TEXT PRIMARY KEY,
+      -- Character offset into the decoded file, matching how the watcher
+      -- measures. Not stat().size, which drifts on any multi-byte content.
+      charOffset INTEGER NOT NULL,
+      updatedAt TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
     console.log(`[codememory] Database migrations completed successfully`);
 }
 /**

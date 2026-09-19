@@ -38,6 +38,21 @@ export interface ProjectWatcherOptions {
    * after start are unaffected — they are genuinely new and read from 0.
    */
   seedExistingFilesToEnd?: boolean;
+
+  /**
+   * Durable read positions, supplied by the daemon.
+   *
+   * The watcher stays a stateless transformer: it accepts an initial offset
+   * and reports progress back, and never touches the database itself. When
+   * this is absent the watcher behaves exactly as before.
+   */
+  offsetStore?: WatcherOffsetStore;
+}
+
+export interface WatcherOffsetStore {
+  /** Every known read position, keyed by absolute file path. */
+  load(): Promise<Map<string, number>>;
+  save(filePath: string, charOffset: number): Promise<void>;
 }
 
 export class ProjectWatcher {
@@ -103,8 +118,13 @@ export class ProjectWatcher {
       await this.handleFileUpdate(event.filePath);
     });
 
+    // Restore first, then seed. Seeding only covers what has no stored
+    // position, so a known file continues where it stopped instead of being
+    // written off as already handled.
+    const restored = await this.restoreOffsets();
+
     if (this.options.seedExistingFilesToEnd) {
-      await this.seedExistingFiles();
+      await this.seedExistingFiles(restored);
     }
 
     await this.watcher.start();
@@ -138,6 +158,9 @@ export class ProjectWatcher {
   async markFileConsumed(filePath: string): Promise<void> {
     const length = await this.watcher.currentLength(filePath);
     this.watcher.seedOffset(filePath, length);
+    // Persist it too, or a restart after a re-import would replay the whole
+    // transcript the re-import just finished replaying.
+    await this.persistOffset(filePath);
   }
 
   /** Full parse of one transcript, used by the re-import path. */
@@ -145,7 +168,49 @@ export class ProjectWatcher {
     return this.watcher.readAllLines(filePath);
   }
 
-  private async seedExistingFiles(): Promise<void> {
+  /**
+   * Reload stored read positions.
+   *
+   * A file shorter than its stored offset was truncated or rewritten, so the
+   * offset no longer points at a line boundary and reading from it would slice
+   * a record in half. Those reset to 0 and are read in full.
+   */
+  private async restoreOffsets(): Promise<Set<string>> {
+    const restored = new Set<string>();
+    if (!this.options.offsetStore) return restored;
+
+    let stored: Map<string, number>;
+    try {
+      stored = await this.options.offsetStore.load();
+    } catch (error) {
+      this.deps.warn(`[ProjectWatcher] Could not load stored offsets: ${error}`);
+      return restored;
+    }
+
+    let rewound = 0;
+    for (const [filePath, charOffset] of stored) {
+      if (!filePath.startsWith(this.projectWatchPath)) continue;
+      const length = await this.watcher.currentLength(filePath);
+      if (length <= 0) continue;
+      if (charOffset > length) {
+        this.watcher.seedOffset(filePath, 0);
+        rewound++;
+      } else {
+        this.watcher.seedOffset(filePath, charOffset);
+      }
+      restored.add(filePath);
+    }
+
+    if (restored.size > 0) {
+      this.deps.info(
+        `[ProjectWatcher] Resumed ${restored.size} transcript(s) from stored offsets` +
+          (rewound > 0 ? `; ${rewound} rewound after truncation` : "")
+      );
+    }
+    return restored;
+  }
+
+  private async seedExistingFiles(restored: Set<string> = new Set()): Promise<void> {
     let entries: string[] = [];
     try {
       entries = await readdir(this.projectWatchPath);
@@ -158,6 +223,7 @@ export class ProjectWatcher {
     for (const name of entries) {
       if (!name.endsWith(".jsonl")) continue;
       const filePath = join(this.projectWatchPath, name);
+      if (restored.has(filePath)) continue;
       const length = await this.watcher.currentLength(filePath);
       if (length > 0) {
         this.watcher.seedOffset(filePath, length);
@@ -172,6 +238,27 @@ export class ProjectWatcher {
     }
   }
 
+  /**
+   * Record the read position after a batch has been dispatched, not before.
+   *
+   * A crash between the two therefore re-reads that batch on the next start,
+   * which costs at most one poll interval of duplicate rows. Saving first
+   * would drop the batch instead. Re-reading is the recoverable direction;
+   * losing the messages is not, and losing them is exactly the failure this
+   * table exists to prevent.
+   */
+  private async persistOffset(filePath: string): Promise<void> {
+    if (!this.options.offsetStore) return;
+    try {
+      await this.options.offsetStore.save(
+        filePath,
+        this.watcher.getOffset(filePath)
+      );
+    } catch (error) {
+      this.deps.warn(`[ProjectWatcher] Could not persist offset: ${error}`);
+    }
+  }
+
   private async handleNewFile(filePath: string): Promise<void> {
     // IMPORTANT: use readNewLines (not readAllLines) here so the offset map
     // gets advanced. Otherwise the next poll will re-emit every line via
@@ -181,6 +268,7 @@ export class ProjectWatcher {
       const messages = await this.watcher.readNewLines(filePath);
       this.deps.debug(`[ProjectWatcher] Read ${messages.length} messages from ${filePath}`);
       await this.dispatchMessages(messages, filePath);
+      await this.persistOffset(filePath);
     } catch (error) {
       this.deps.error(`[ProjectWatcher] Failed to handle new file: ${error}`);
     }
@@ -192,6 +280,7 @@ export class ProjectWatcher {
       if (newMessages.length > 0) {
         this.deps.debug(`[ProjectWatcher] Read ${newMessages.length} new messages from ${filePath}`);
         await this.dispatchMessages(newMessages, filePath);
+        await this.persistOffset(filePath);
       }
     } catch (error) {
       this.deps.error(`[ProjectWatcher] Failed to handle file update: ${error}`);

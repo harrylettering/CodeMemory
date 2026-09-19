@@ -89,6 +89,12 @@ export interface CodeMemoryConfig {
    * relies on the model passing `supersedesNodeId` itself.
    * Same-conversation only; cross-session is never auto-handled.
    */
+  /**
+   * Milliseconds of inactivity after which a daemon exits on its own. 0
+   * disables it. SessionEnd is not a reliable teardown signal, so without
+   * this a daemon outlives its session until the machine is rebooted.
+   */
+  daemonIdleTimeoutMs: number;
   autoSupersedeViaLlm: boolean;
   /** Model for the auto-supersede judge. Unset = host default. */
   autoSupersedeModel?: string;
@@ -133,6 +139,9 @@ export function resolveCodeMemoryConfig(env: NodeJS.ProcessEnv = process.env): C
       env.CODEMEMORY_EXPLORED_TARGET_WINDOW_MS || String(30 * 60 * 1000)
     ),
     workspaceRoot: env.CODEMEMORY_WORKSPACE_ROOT || process.cwd(),
+    daemonIdleTimeoutMs: parseInt(
+      env.CODEMEMORY_DAEMON_IDLE_TIMEOUT_MS || String(30 * 60 * 1000)
+    ),
     autoSupersedeViaLlm: env.CODEMEMORY_AUTO_SUPERSEDE_VIA_LLM === "true",
     autoSupersedeModel: env.CODEMEMORY_AUTO_SUPERSEDE_MODEL || undefined,
     autoSupersedeMaxCandidates: parseInt(
