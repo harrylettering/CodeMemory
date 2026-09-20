@@ -95,11 +95,12 @@ export class ConversationStore {
             const result = await this.db.run(`
         INSERT INTO conversation_messages (
           conversationId, seq, role, content, tokenCount, createdAt, tier, tags,
-          sourceUuid
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+          sourceUuid, producerAgentId, producerPromptId
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `, [
                 params.conversationId, seq, params.role, params.content,
-                params.tokenCount, now, tier, tagsJson, params.sourceUuid ?? null
+                params.tokenCount, now, tier, tagsJson, params.sourceUuid ?? null,
+                params.producerAgentId ?? null, params.producerPromptId ?? null
             ]);
             messageId = result.lastID;
         }

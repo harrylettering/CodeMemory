@@ -746,6 +746,10 @@ async function startDaemon(args: string[]) {
           // Lets the store refuse a line another daemon watching the same
           // project directory has already stored.
           sourceUuid: message.sourceUuid,
+          // Absent on main-agent entries, which is how the main agent is
+          // identified -- there is no sentinel to substitute here.
+          producerAgentId: message.agentId,
+          producerPromptId: message.promptId,
           parts: [{
             partType: "text",
             textContent: score.content,

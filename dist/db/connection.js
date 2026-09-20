@@ -780,6 +780,27 @@ export async function runCodeMemoryMigrations(db) {
       ON conversation_messages(conversationId, sourceUuid)
       WHERE sourceUuid IS NOT NULL
   `);
+    // Migration 33: record which agent produced a message.
+    //
+    // A subagent's work is ingested into the parent conversation -- correctly,
+    // it is the parent's work -- but nothing said which agent did it. The only
+    // marker was a `sidechain` tag: a boolean that cannot separate two
+    // concurrent subagents and never reached memory_nodes at all.
+    //
+    // Nullable, and NULL means the main agent. That is not a default standing in
+    // for missing data: real main-agent transcript entries carry no agentId, so
+    // absence is the identity. Same convention as sourceUuid.
+    //
+    // promptId is not redundant. Two subagents dispatched in one turn share a
+    // promptId and differ by agentId, so the pair is the identity and the
+    // promptId half is what makes a concurrent dispatch separable afterwards.
+    await addColumnIfMissing(db, "conversation_messages", "producerAgentId", "TEXT");
+    await addColumnIfMissing(db, "conversation_messages", "producerPromptId", "TEXT");
+    await db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_conversation_messages_producer
+      ON conversation_messages(conversationId, producerAgentId)
+      WHERE producerAgentId IS NOT NULL
+  `);
     console.log(`[codememory] Database migrations completed successfully`);
 }
 /**

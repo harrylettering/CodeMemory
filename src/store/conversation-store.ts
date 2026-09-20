@@ -136,6 +136,14 @@ export class ConversationStore {
      * store it, and messageId is an AUTOINCREMENT key that cannot collide.
      */
     sourceUuid?: string;
+    /**
+     * The subagent that produced this line, absent for the main agent.
+     * Stored as NULL rather than a sentinel: real main-agent entries carry no
+     * agentId, so absence is the identity.
+     */
+    producerAgentId?: string;
+    /** The dispatch it belongs to; separates subagents launched in one turn. */
+    producerPromptId?: string;
   }): Promise<MessageRecord> {
     const now = new Date().toISOString();
 
@@ -180,11 +188,12 @@ export class ConversationStore {
       const result = await this.db.run(`
         INSERT INTO conversation_messages (
           conversationId, seq, role, content, tokenCount, createdAt, tier, tags,
-          sourceUuid
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+          sourceUuid, producerAgentId, producerPromptId
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `, [
         params.conversationId, seq, params.role, params.content,
-        params.tokenCount, now, tier, tagsJson, params.sourceUuid ?? null
+        params.tokenCount, now, tier, tagsJson, params.sourceUuid ?? null,
+        params.producerAgentId ?? null, params.producerPromptId ?? null
       ]);
       messageId = result.lastID;
     } catch (error) {
