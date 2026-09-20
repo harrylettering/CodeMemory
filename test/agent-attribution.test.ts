@@ -330,3 +330,51 @@ describe("the identity is inherited, not looked up", () => {
     expect(row.producerAgentId).toBeNull();
   });
 });
+
+describe("the mark path carries attribution all the way down", () => {
+  const SUB = "a46733a66c860abb9";
+
+  // These are the writes a subagent can make on its own initiative, so they
+  // are the ones that most need to be distinguishable afterwards. The types
+  // compiling is not evidence the value arrives -- this codebase has produced
+  // several fields that were declared, passed, typechecked and dropped.
+  it.each([
+    ["decision", "createDecisionNode", { decision: "use A", rationale: "smaller", content: "[DECISION] use A" }],
+    ["task", "createTaskNode", { task: "ship it", content: "[TASK] ship it" }],
+    ["constraint", "createConstraintNode", { constraint: "never block tools", content: "[CONSTRAINT] never block tools" }],
+  ])("a %s marked by a subagent is attributable", async (kind, fn, extra) => {
+    const store: any = createMemoryNodeStore(db);
+    await store[fn]({
+      conversationId: 1,
+      sessionId: "sess-A",
+      sourceToolUseId: `toolu_${kind}`,
+      producerAgentId: SUB,
+      producerPromptId: "83be3dd3",
+      ...extra,
+    });
+
+    const row = await db.get(
+      "SELECT producerAgentId, producerPromptId FROM memory_nodes WHERE kind = ?",
+      kind
+    );
+    expect(row.producerAgentId).toBe(SUB);
+    expect(row.producerPromptId).toBe("83be3dd3");
+  });
+
+  it("a mark by the main agent stays NULL", async () => {
+    const store: any = createMemoryNodeStore(db);
+    await store.createDecisionNode({
+      conversationId: 1,
+      sessionId: "sess-A",
+      sourceToolUseId: "toolu_main",
+      decision: "use B",
+      rationale: "deliberated",
+      content: "[DECISION] use B",
+    });
+
+    const row = await db.get(
+      "SELECT producerAgentId FROM memory_nodes WHERE kind = 'decision'"
+    );
+    expect(row.producerAgentId).toBeNull();
+  });
+});

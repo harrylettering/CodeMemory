@@ -49,14 +49,14 @@
 
 ## 项目进度
 ```
-[========········] 50% 已完成
+[============····] 75% 已完成
 ```
 
 ## 统计信息
 - 总任务数: 4
-- 已完成: 2
-- 待执行: 2
-- 完成率: 50%
+- 已完成: 3
+- 待执行: 1
+- 完成率: 75%
 
 ---
 
@@ -122,8 +122,8 @@
   而非 `const node = await`）。两次造成重复键、一次完全没改到。最后改用行号定位才对。
   **正则改代码在相似结构上不可靠**，这已是本轮第二次
 
-### ⏳ T3: 标记工具注入 agent 身份
-- **状态**: pending
+### ✅ T3: 标记工具注入 agent 身份
+- **状态**: completed
 - **描述**: `pre-tool-use.sh` 把 `agent_id` / `agent_type` / `prompt_id` 转发给 daemon；mark 工具在装配层注入，**schema 不暴露**
 - **预估时间**: 1.5 小时
 - **优先级**: 高
@@ -139,7 +139,27 @@
   - 风险描述: 身份若可由模型指定，就可以被伪造；而这条链最长（脚本 → 路由 → 工具），中间任一段漏掉都是静默的
   - 应对建议: 端到端测一次完整链路，不只测工具层
 - **回滚方案**: `git revert`
-- **交付物**: `hooks/scripts/pre-tool-use.sh`, `src/hooks/daemon.ts`, `src/tools/codememory-mark-*.ts`, `src/plugin/index.ts`, 测试
+- **完成时间**: 2026-09-21
+- **交付物**: 新增 `src/hooks/agent-correlation.ts`，加上 `pre-tool-use.sh`、`daemon.ts`、
+  两个 mark 工具、`memory-store.ts`、两个测试文件
+- **实测排除了两条路**:
+  - **环境变量不行**。子 agent 和主 agent 的 `CLAUDE_*` 完全一样（逐项对比过），
+    所以走脚本的 skill 路径无法从环境得知自己是谁
+  - **"当前 agent"全局状态不行**。同一轮派发的两个子 agent 并发运行，后写的会认领两者的标记
+- **采用的方案**：按 `tool_use_id` 关联。`PreToolUse` 载荷里 `agent_id` 和 `tool_use_id` 同时存在，
+  而 mark 载荷本来就为幂等带着 `sourceToolUseId`。**关联键唯一，并发下天然正确，无共享可变状态**
+- **变异检验**（链路三段各自独立可失败）:
+
+| 变异 | 结果 |
+|---|---|
+| hook 不转发 `agent_id` | 1 条红 |
+| 关联表不记录 | 4 条红 |
+| decision 不转发 | 1 条红 |
+
+- **防伪造**: 测试断言 mark 工具的 schema 里**没有** `producerAgentId`——
+  能由调用方提供的身份就是能被伪造的身份
+- **过程记录**: 这一轮里"类型加了、值没传下去"出现了 **4 次**（decision / task /
+  constraint / requirementLike），每次 tsc 都是绿的。全部靠按 kind 枚举的测试抓出来
 
 ### ⏳ T4: 埋点升级并观察
 - **状态**: pending

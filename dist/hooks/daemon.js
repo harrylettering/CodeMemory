@@ -9,6 +9,7 @@ import * as fs from "node:fs";
 import * as http from "node:http";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
+import { AgentCorrelationTable } from "./agent-correlation.js";
 import { startProjectWatcher } from "./project-watcher-manager.js";
 import { buildExtractionTranscript, extractKeyMemories, } from "../memory/extract-key-memories.js";
 import { resolveCodeMemoryConfig } from "../db/config.js";
@@ -115,6 +116,11 @@ async function startDaemon(args) {
         // unresolved failure is considered resolved (assistant moved on, no
         // more errors on the same signature).
         const RESOLVE_STALE_WINDOW = 50;
+        // Remembers which agent announced which tool call, so a memory write can
+        // be attributed to its own caller. Not a "current agent" field: two
+        // subagents dispatched in one turn run at once, and a single slot would
+        // give both their writes to whichever moved last.
+        const agentCorrelation = new AgentCorrelationTable();
         const STALE_MAINTENANCE_INTERVAL_MS = 60 * 60 * 1000;
         let lastStaleMaintenanceAt = 0;
         // Anything that means this session is still alive: a hook talking to the
@@ -358,6 +364,16 @@ async function startDaemon(args) {
                             sessionId: body.sessionId,
                             supersedesNodeId: body.supersedesNodeId,
                             sourceToolUseId: body.sourceToolUseId,
+                            // Attribution follows the tool call that produced this mark.
+                            // Undefined means the main agent: PreToolUse carries no agent_id
+                            // for its calls, so nothing was ever banked and the miss is the
+                            // answer rather than a failure.
+                            ...(() => {
+                                const who = agentCorrelation.lookup(body.sourceToolUseId);
+                                return who
+                                    ? { producerAgentId: who.agentId, producerPromptId: who.promptId }
+                                    : {};
+                            })(),
                         });
                         res.statusCode = result.ok ? 200 : 400;
                         res.setHeader("content-type", "application/json");
@@ -385,6 +401,16 @@ async function startDaemon(args) {
                             sessionId: body.sessionId,
                             supersedesNodeId: body.supersedesNodeId,
                             sourceToolUseId: body.sourceToolUseId,
+                            // Attribution follows the tool call that produced this mark.
+                            // Undefined means the main agent: PreToolUse carries no agent_id
+                            // for its calls, so nothing was ever banked and the miss is the
+                            // answer rather than a failure.
+                            ...(() => {
+                                const who = agentCorrelation.lookup(body.sourceToolUseId);
+                                return who
+                                    ? { producerAgentId: who.agentId, producerPromptId: who.promptId }
+                                    : {};
+                            })(),
                         });
                         res.statusCode = result.ok ? 200 : 400;
                         res.setHeader("content-type", "application/json");
@@ -407,6 +433,15 @@ async function startDaemon(args) {
             req.on("end", async () => {
                 try {
                     const body = JSON.parse(Buffer.concat(chunks).toString("utf-8"));
+                    // PreToolUse is the only place a subagent's identity is visible, so
+                    // it is banked here against the tool call's id and read back when a
+                    // mark arrives carrying that id.
+                    if (body?.toolUseId && body?.agentId) {
+                        agentCorrelation.record(String(body.toolUseId), {
+                            agentId: String(body.agentId),
+                            promptId: body.promptId ? String(body.promptId) : undefined,
+                        });
+                    }
                     // Recall is bounded by conversation. Resolving it here rather than
                     // inside the lookup keeps the scope decision in the layer that knows
                     // which session is calling.

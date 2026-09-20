@@ -44,6 +44,8 @@ export class CodeMemoryMarkRequirementTool {
         const content = renderRequirementContent(params);
         const memoryNode = kind === "task"
             ? await this.memoryStore.createTaskNode({
+                producerAgentId: params.producerAgentId,
+                producerPromptId: params.producerPromptId,
                 conversationId: conversation.conversationId,
                 sessionId,
                 sourceToolUseId: params.sourceToolUseId ?? null,
@@ -54,6 +56,8 @@ export class CodeMemoryMarkRequirementTool {
                 supersedesNodeId: params.supersedesNodeId,
             })
             : await this.memoryStore.createConstraintNode({
+                producerAgentId: params.producerAgentId,
+                producerPromptId: params.producerPromptId,
                 conversationId: conversation.conversationId,
                 sessionId,
                 sourceToolUseId: params.sourceToolUseId ?? null,

@@ -33,6 +33,16 @@ INPUT=$(cat)
 SESSION_ID=$(printf '%s' "$INPUT" | jq -r '.session_id // "unknown"')
 TOOL_NAME=$(printf '%s' "$INPUT" | jq -r '.tool_name // ""')
 TOOL_INPUT=$(printf '%s' "$INPUT" | jq -c '.tool_input // {}')
+# Who is making this call, and which call it is.
+#
+# A subagent can write memory, and nothing else on that write says who wrote
+# it: its CLAUDE_* environment is byte-identical to the main agent's, so a
+# script curling the daemon cannot learn its own identity. This payload is the
+# one place the answer exists, and tool_use_id is what later ties a mark back
+# to it. Empty on main-agent calls -- absence is the main agent's identity.
+AGENT_ID=$(printf '%s' "$INPUT" | jq -r '.agent_id // ""')
+PROMPT_ID=$(printf '%s' "$INPUT" | jq -r '.prompt_id // ""')
+TOOL_USE_ID=$(printf '%s' "$INPUT" | jq -r '.tool_use_id // ""')
 # The cold-start CLI qualifies file tags against CODEMEMORY_WORKSPACE_ROOT,
 # falling back to cwd. The daemon gets this exported by session-start.sh; pin
 # it here too so the read path computes the same workspace key the write path
@@ -57,7 +67,13 @@ if [ -S "$SOCKET_PATH" ] && command -v curl >/dev/null 2>&1; then
   PAYLOAD=$(jq -nc \
     --arg name "$TOOL_NAME" \
     --argjson input "$TOOL_INPUT" \
-    '{toolName: $name, toolInput: $input}')
+      --arg agentId "$AGENT_ID" \
+      --arg promptId "$PROMPT_ID" \
+      --arg toolUseId "$TOOL_USE_ID" \
+      '{toolName: $name, toolInput: $input,
+        agentId: (if $agentId == "" then null else $agentId end),
+        promptId: (if $promptId == "" then null else $promptId end),
+        toolUseId: (if $toolUseId == "" then null else $toolUseId end)}')
 
   if RESPONSE=$(curl -fsS \
         --unix-socket "$SOCKET_PATH" \

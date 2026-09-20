@@ -832,6 +832,8 @@ export class MemoryNodeStore {
             (input.messageId != null ? String(input.messageId) : nodeId);
         const evidenceMessageId = typeof input.messageId === "number" ? input.messageId : null;
         const node = await this.upsertNode({
+            producerAgentId: input.producerAgentId,
+            producerPromptId: input.producerPromptId,
             nodeId,
             kind: "decision",
             status: "active",
@@ -1172,6 +1174,8 @@ export class MemoryNodeStore {
     }
     async createTaskNode(input) {
         return this.createRequirementLikeNode({
+            producerAgentId: input.producerAgentId,
+            producerPromptId: input.producerPromptId,
             nodeId: requirementNodeId("task", input.sourceToolUseId, input.messageId),
             kind: "task",
             conversationId: input.conversationId,
@@ -1191,6 +1195,8 @@ export class MemoryNodeStore {
     }
     async createConstraintNode(input) {
         return this.createRequirementLikeNode({
+            producerAgentId: input.producerAgentId,
+            producerPromptId: input.producerPromptId,
             nodeId: requirementNodeId("constraint", input.sourceToolUseId, input.messageId),
             kind: "constraint",
             conversationId: input.conversationId,
@@ -1287,6 +1293,8 @@ export class MemoryNodeStore {
             (input.messageId != null ? String(input.messageId) : input.nodeId);
         const evidenceMessageId = typeof input.messageId === "number" ? input.messageId : null;
         const node = await this.upsertNode({
+            producerAgentId: input.producerAgentId,
+            producerPromptId: input.producerPromptId,
             nodeId: input.nodeId,
             kind: input.kind,
             status: "active",

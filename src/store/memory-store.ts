@@ -330,6 +330,9 @@ export interface CreateFixAttemptNodeInput {
 }
 
 export interface CreateTaskNodeInput {
+  /** The agent that produced this node; absent means the main agent. */
+  producerAgentId?: string;
+  producerPromptId?: string;
   conversationId: number;
   sessionId?: string | null;
   /** Legacy anchor — only used for nodeId derivation when no toolUseId. */
@@ -345,6 +348,9 @@ export interface CreateTaskNodeInput {
 }
 
 export interface CreateConstraintNodeInput {
+  /** The agent that produced this node; absent means the main agent. */
+  producerAgentId?: string;
+  producerPromptId?: string;
   conversationId: number;
   sessionId?: string | null;
   messageId?: number | null;
@@ -1447,6 +1453,9 @@ export class MemoryNodeStore {
   }
 
   async createDecisionNode(input: {
+  /** The agent that produced this node; absent means the main agent. */
+  producerAgentId?: string;
+  producerPromptId?: string;
     conversationId: number;
     sessionId?: string | null;
     /** Legacy anchor for tests that pre-date the Skill→daemon flow. */
@@ -1476,6 +1485,8 @@ export class MemoryNodeStore {
       typeof input.messageId === "number" ? input.messageId : null;
 
     const node = await this.upsertNode({
+      producerAgentId: input.producerAgentId,
+      producerPromptId: input.producerPromptId,
       nodeId,
       kind: "decision",
       status: "active",
@@ -1872,6 +1883,8 @@ export class MemoryNodeStore {
 
   async createTaskNode(input: CreateTaskNodeInput): Promise<MemoryNodeRecord> {
     return this.createRequirementLikeNode({
+      producerAgentId: input.producerAgentId,
+      producerPromptId: input.producerPromptId,
       nodeId: requirementNodeId("task", input.sourceToolUseId, input.messageId),
       kind: "task",
       conversationId: input.conversationId,
@@ -1894,6 +1907,8 @@ export class MemoryNodeStore {
     input: CreateConstraintNodeInput
   ): Promise<MemoryNodeRecord> {
     return this.createRequirementLikeNode({
+      producerAgentId: input.producerAgentId,
+      producerPromptId: input.producerPromptId,
       nodeId: requirementNodeId(
         "constraint",
         input.sourceToolUseId,
@@ -1984,6 +1999,9 @@ export class MemoryNodeStore {
   }
 
   private async createRequirementLikeNode(input: {
+    /** The agent that produced this node; absent means the main agent. */
+    producerAgentId?: string;
+    producerPromptId?: string;
     nodeId: string;
     kind: "task" | "constraint";
     conversationId: number;
@@ -2022,6 +2040,8 @@ export class MemoryNodeStore {
       typeof input.messageId === "number" ? input.messageId : null;
 
     const node = await this.upsertNode({
+      producerAgentId: input.producerAgentId,
+      producerPromptId: input.producerPromptId,
       nodeId: input.nodeId,
       kind: input.kind,
       status: "active",
