@@ -49,14 +49,14 @@
 
 ## 项目进度
 ```
-[====············] 25% 已完成
+[========········] 50% 已完成
 ```
 
 ## 统计信息
 - 总任务数: 4
-- 已完成: 1
-- 待执行: 3
-- 完成率: 25%
+- 已完成: 2
+- 待执行: 2
+- 完成率: 50%
 
 ---
 
@@ -93,8 +93,8 @@
   `agentId=a46733a66c860abb9  promptId=83be3dd3…`
 - **迁移验证**: 真实库副本 7751 条消息完好，两列就位
 
-### ⏳ T2: 记忆节点带上 agent 身份
-- **状态**: pending
+### ✅ T2: 记忆节点带上 agent 身份
+- **状态**: completed
 - **描述**: 迁移给 `memory_nodes` 加 `producerAgentId` / `producerPromptId`；`createFailureNode` 等写入点从触发它的消息继承
 - **预估时间**: 2 小时
 - **优先级**: **最高**
@@ -110,7 +110,17 @@
   - 风险描述: 写入点分散（failure / fix_attempt / summary / decision / task / constraint），漏一个就留一类分不出来的节点
   - 应对建议: 测试按 kind 枚举，不按调用点枚举
 - **回滚方案**: `git revert`
+- **完成时间**: 2026-09-20
 - **交付物**: `src/store/memory-store.ts`, `src/hooks/daemon.ts`, 迁移 34, 测试
+- **按 kind 枚举奏效了**: 五个 `create*` 函数全部汇入 `upsertNode`，所以 SQL 只有一处，
+  但**入参类型分散**。`it.each` 逐 kind 断言之后，六种都确认能带上身份
+- **变异检验**: 去掉 `upsertNode` 的字段绑定 → **9 条红**
+- **迁移验证**: 真实库副本 333 个节点完好；存量**全部为 NULL**——历史数据无法回溯归属，
+  这是预期的，不是缺陷
+- **过程记录**: 用正则往 `createFailureNode` 插转发代码，连续三次落到了
+  `createFixAttemptNode` 上（两者在同一段匹配范围内，且前者用 `return this.upsertNode({`
+  而非 `const node = await`）。两次造成重复键、一次完全没改到。最后改用行号定位才对。
+  **正则改代码在相似结构上不可靠**，这已是本轮第二次
 
 ### ⏳ T3: 标记工具注入 agent 身份
 - **状态**: pending

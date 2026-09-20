@@ -192,6 +192,16 @@ export interface FailureAnchorCandidate {
 }
 
 export interface UpsertMemoryNodeInput {
+  /**
+   * The subagent that produced this node, absent for the main agent.
+   *
+   * Inherited from the message that triggered the write, never read from a
+   * global "current agent" -- concurrent subagents make any such global wrong
+   * by construction.
+   */
+  producerAgentId?: string;
+  /** The dispatch it belongs to; separates subagents launched in one turn. */
+  producerPromptId?: string;
   nodeId: string;
   kind: MemoryNodeKind;
   status?: MemoryNodeStatus;
@@ -255,6 +265,12 @@ export interface StaleMaintenanceResult {
 
 export interface CreateFailureNodeInput {
   conversationId: number;
+  /**
+   * Inherited from the message whose error text produced this node, so a
+   * failure a subagent hit is attributable to that subagent.
+   */
+  producerAgentId?: string;
+  producerPromptId?: string;
   sessionId?: string | null;
   /** Conversation seq of the failure occurrence — used for auto-resolve windows. */
   seq: number;
@@ -295,6 +311,9 @@ export interface AutoResolveStaleFailureNodesInput {
 }
 
 export interface CreateFixAttemptNodeInput {
+  /** Inherited from the message this attempt was observed on. */
+  producerAgentId?: string;
+  producerPromptId?: string;
   attemptId: string;
   conversationId: number;
   sessionId?: string | null;
@@ -365,8 +384,9 @@ export class MemoryNodeStore {
       `INSERT INTO memory_nodes (
          nodeId, kind, status, confidence, conversationId, sessionId,
          source, sourceId, sourceToolUseId, summaryId, content, metadata,
-         supersedesNodeId, createdAt, updatedAt
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         supersedesNodeId, producerAgentId, producerPromptId,
+         createdAt, updatedAt
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(nodeId) DO UPDATE SET
          kind = excluded.kind,
          status = excluded.status,
@@ -395,6 +415,8 @@ export class MemoryNodeStore {
         quality.content,
         metadata,
         input.supersedesNodeId ?? null,
+        input.producerAgentId ?? null,
+        input.producerPromptId ?? null,
         now,
         now,
       ]
@@ -1648,6 +1670,8 @@ export class MemoryNodeStore {
       input.nodeIdOverride ?? `failure-${input.conversationId}-${input.seq}`;
 
     return this.upsertNode({
+      producerAgentId: input.producerAgentId,
+      producerPromptId: input.producerPromptId,
       nodeId,
       kind: "failure",
       status: "active",
@@ -1808,6 +1832,8 @@ export class MemoryNodeStore {
           ];
 
     const node = await this.upsertNode({
+      producerAgentId: input.producerAgentId,
+      producerPromptId: input.producerPromptId,
       nodeId: `fix-attempt-${input.attemptId}`,
       kind: "fix_attempt",
       status,

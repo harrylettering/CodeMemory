@@ -860,6 +860,10 @@ async function startDaemon(args: string[]) {
               `Extracting failure (type=${extracted.type}, file=${extracted.filePath}, cmd=${extracted.command})`
             );
             const failureNode = await memoryStore.createFailureNode({
+              // Attribution follows the message the error came from, so a
+              // failure a subagent hit stays attributable to it.
+              producerAgentId: message.agentId,
+              producerPromptId: message.promptId,
               conversationId: conversation.conversationId,
               sessionId: fileSessionId,
               seq,

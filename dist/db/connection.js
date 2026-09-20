@@ -801,6 +801,24 @@ export async function runCodeMemoryMigrations(db) {
       ON conversation_messages(conversationId, producerAgentId)
       WHERE producerAgentId IS NOT NULL
   `);
+    // Migration 34: record which agent produced a memory node.
+    //
+    // Migration 33 covers messages; this is the half that matters more. A
+    // subagent can call codememory_mark_decision, and what it writes lands in
+    // the parent conversation looking exactly like a decision the main agent
+    // deliberated over. Failing to read something costs information; failing to
+    // tell writes apart corrupts the basis for judgement.
+    //
+    // NULL is the main agent, matching migration 33 and sourceUuid: real
+    // main-agent transcript entries carry no agentId, so absence is the identity
+    // rather than a default standing in for missing data.
+    await addColumnIfMissing(db, "memory_nodes", "producerAgentId", "TEXT");
+    await addColumnIfMissing(db, "memory_nodes", "producerPromptId", "TEXT");
+    await db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_memory_nodes_producer
+      ON memory_nodes(conversationId, producerAgentId)
+      WHERE producerAgentId IS NOT NULL
+  `);
     console.log(`[codememory] Database migrations completed successfully`);
 }
 /**

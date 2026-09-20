@@ -19,8 +19,9 @@ export class MemoryNodeStore {
         await this.db.run(`INSERT INTO memory_nodes (
          nodeId, kind, status, confidence, conversationId, sessionId,
          source, sourceId, sourceToolUseId, summaryId, content, metadata,
-         supersedesNodeId, createdAt, updatedAt
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         supersedesNodeId, producerAgentId, producerPromptId,
+         createdAt, updatedAt
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(nodeId) DO UPDATE SET
          kind = excluded.kind,
          status = excluded.status,
@@ -48,6 +49,8 @@ export class MemoryNodeStore {
             quality.content,
             metadata,
             input.supersedesNodeId ?? null,
+            input.producerAgentId ?? null,
+            input.producerPromptId ?? null,
             now,
             now,
         ]);
@@ -995,6 +998,8 @@ export class MemoryNodeStore {
         ];
         const nodeId = input.nodeIdOverride ?? `failure-${input.conversationId}-${input.seq}`;
         return this.upsertNode({
+            producerAgentId: input.producerAgentId,
+            producerPromptId: input.producerPromptId,
             nodeId,
             kind: "failure",
             status: "active",
@@ -1130,6 +1135,8 @@ export class MemoryNodeStore {
                 })),
             ];
         const node = await this.upsertNode({
+            producerAgentId: input.producerAgentId,
+            producerPromptId: input.producerPromptId,
             nodeId: `fix-attempt-${input.attemptId}`,
             kind: "fix_attempt",
             status,

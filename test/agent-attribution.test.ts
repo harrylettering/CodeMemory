@@ -29,6 +29,7 @@ import { tmpdir } from "node:os";
 
 import { createCodeMemoryDatabaseConnection } from "../src/db/connection.js";
 import { ConversationStore } from "../src/store/conversation-store.js";
+import { createMemoryNodeStore } from "../src/store/memory-store.js";
 import { ProjectWatcher } from "../src/hooks/project-watcher-manager.js";
 
 let dbDir: string;
@@ -186,5 +187,146 @@ describe("the watcher reads the identity off the transcript", () => {
     const [msg] = await collect();
     expect(msg.agentId).toBeUndefined();
     expect(msg.promptId).toBeUndefined();
+  });
+});
+
+describe("memory_nodes records the producing agent", () => {
+  const SUB = "a46733a66c860abb9";
+  const PROMPT = "83be3dd3-391f-4018-81d0-9d8daa4e46a8";
+
+  const producedBy = async (nodeId: string) =>
+    db.get(
+      "SELECT producerAgentId, producerPromptId FROM memory_nodes WHERE nodeId = ?",
+      nodeId
+    );
+
+  // Enumerated by kind rather than by call site. The write points are spread
+  // across five create* functions and it is the kinds, not the functions, that
+  // have to come out distinguishable.
+  const kinds = [
+    "decision",
+    "failure",
+    "fix_attempt",
+    "task",
+    "constraint",
+    "summary",
+  ] as const;
+
+  it.each(kinds)("carries the subagent identity on a %s node", async (kind) => {
+    const store = createMemoryNodeStore(db);
+    await store.upsertNode({
+      nodeId: `${kind}-sub`,
+      kind: kind as any,
+      conversationId: 1,
+      source: "test",
+      sourceId: `${kind}-sub`,
+      summaryId: kind === "summary" ? `leaf-${kind}` : undefined,
+      content: `[${kind.toUpperCase()}] produced by a subagent`,
+      producerAgentId: SUB,
+      producerPromptId: PROMPT,
+    } as any);
+
+    const row = await producedBy(`${kind}-sub`);
+    expect(row.producerAgentId).toBe(SUB);
+    expect(row.producerPromptId).toBe(PROMPT);
+  });
+
+  it("leaves a main-agent node NULL so the two stay distinguishable", async () => {
+    // This is the whole point. A subagent can call codememory_mark_decision,
+    // and without this the result is indistinguishable from a decision the
+    // main agent deliberated over.
+    const store = createMemoryNodeStore(db);
+    await store.upsertNode({
+      nodeId: "decision-main",
+      kind: "decision",
+      conversationId: 1,
+      source: "test",
+      sourceId: "decision-main",
+      content: "[DECISION] deliberated by the main agent",
+    } as any);
+    await store.upsertNode({
+      nodeId: "decision-sub",
+      kind: "decision",
+      conversationId: 1,
+      source: "test",
+      sourceId: "decision-sub",
+      content: "[DECISION] marked in passing by a subagent",
+      producerAgentId: SUB,
+      producerPromptId: PROMPT,
+    } as any);
+
+    expect((await producedBy("decision-main")).producerAgentId).toBeNull();
+    expect((await producedBy("decision-sub")).producerAgentId).toBe(SUB);
+
+    const subagentDecisions = await db.all(
+      "SELECT nodeId FROM memory_nodes WHERE kind = 'decision' AND producerAgentId IS NOT NULL"
+    );
+    expect(subagentDecisions.map((r: any) => r.nodeId)).toEqual(["decision-sub"]);
+  });
+
+  it("keeps two concurrent subagents' nodes apart", async () => {
+    const store = createMemoryNodeStore(db);
+    for (const agent of ["agent-a", "agent-b"]) {
+      await store.upsertNode({
+        nodeId: `failure-${agent}`,
+        kind: "failure",
+        conversationId: 1,
+        source: "test",
+        sourceId: `failure-${agent}`,
+        content: "[FAILURE] boom",
+        producerAgentId: agent,
+        producerPromptId: "same-turn",
+      } as any);
+    }
+
+    expect((await producedBy("failure-agent-a")).producerAgentId).toBe("agent-a");
+    expect((await producedBy("failure-agent-b")).producerAgentId).toBe("agent-b");
+  });
+});
+
+describe("the identity is inherited, not looked up", () => {
+  it("a failure node carries the identity of the message it came from", async () => {
+    // The chain that matters end to end: transcript entry -> message ->
+    // failure node. Asserting it at the store boundary rather than mocking a
+    // "current agent" is the point -- a global current-agent would be wrong by
+    // construction the moment two subagents run at once.
+    const store = createMemoryNodeStore(db);
+    await store.createFailureNode({
+      conversationId: 1,
+      sessionId: "sess-A",
+      seq: 1,
+      type: "exit_error",
+      signature: "boom",
+      raw: "boom",
+      filePath: "a.ts",
+      weight: 1,
+      producerAgentId: "a46733a66c860abb9",
+      producerPromptId: "83be3dd3",
+    } as any);
+
+    const row = await db.get(
+      "SELECT producerAgentId, producerPromptId FROM memory_nodes WHERE kind = 'failure'"
+    );
+    expect(row.producerAgentId).toBe("a46733a66c860abb9");
+    expect(row.producerPromptId).toBe("83be3dd3");
+  });
+
+  it("a failure the main agent hit stays NULL", async () => {
+    const store = createMemoryNodeStore(db);
+    await store.createFailureNode({
+      conversationId: 1,
+      sessionId: "sess-A",
+      seq: 2,
+      type: "exit_error",
+      signature: "main-boom",
+      raw: "main-boom",
+      filePath: "b.ts",
+      weight: 1,
+    } as any);
+
+    const row = await db.get(
+      "SELECT producerAgentId FROM memory_nodes WHERE kind = 'failure'"
+    );
+    expect(row.producerAgentId).toBeNull();
   });
 });
