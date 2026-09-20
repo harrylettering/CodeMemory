@@ -6,7 +6,7 @@
  * Exactly matches CodeMemory's JSONL watcher implementation.
  */
 import { readFile, readdir, stat } from "node:fs/promises";
-import { join, basename } from "node:path";
+import { join, basename, dirname } from "node:path";
 export class CodeMemoryJsonlWatcher {
     deps;
     options;
@@ -19,11 +19,15 @@ export class CodeMemoryJsonlWatcher {
     constructor(deps, options = {}) {
         this.deps = deps;
         this.options = options;
+        // Spread first, then apply defaults. Rebuilding the object from an
+        // explicit key list silently dropped anything the list did not mention,
+        // which is how a new option can be declared, passed, typechecked, and
+        // still do nothing.
         this.options = {
+            ...this.options,
             watchPath: this.options.watchPath || this.getDefaultWatchPath(),
             pollInterval: this.options.pollInterval || 5000,
             includePattern: this.options.includePattern || /\.jsonl$/,
-            excludePattern: this.options.excludePattern,
         };
     }
     getDefaultWatchPath() {
@@ -81,6 +85,14 @@ export class CodeMemoryJsonlWatcher {
                 // subagent ever made — including the failures, which is the one class
                 // of memory that cannot be recovered from the repository afterwards.
                 if (file.isDirectory()) {
+                    // The directory name is the session id, so another session's
+                    // subagents are skipped without even listing them. This is the only
+                    // place ownership is visible -- the files inside are named
+                    // `agent-<agentId>.jsonl` and say nothing about whose they are.
+                    if (this.options.sessionScope &&
+                        file.name !== this.options.sessionScope) {
+                        continue;
+                    }
                     await this.scanSubagentDirectory(join(watchPath, file.name));
                     continue;
                 }
@@ -132,6 +144,16 @@ export class CodeMemoryJsonlWatcher {
     }
     shouldWatchFile(filePath) {
         const fileName = basename(filePath);
+        // Exact match, not a prefix: `<id>-backup.jsonl` starts with the session
+        // id and is not this session's transcript. Only files sitting directly in
+        // the watch path are checked -- subagent files arrive from
+        // scanSubagentDirectory, which has already vetted the directory they are
+        // in, and their own names carry no session id at all.
+        if (this.options.sessionScope &&
+            dirname(filePath) === this.options.watchPath &&
+            fileName !== `${this.options.sessionScope}.jsonl`) {
+            return false;
+        }
         if (this.options.excludePattern && this.options.excludePattern.test(fileName)) {
             return false;
         }

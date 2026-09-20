@@ -9,7 +9,7 @@
 import type { CodeMemoryDependencies } from "../types.js";
 import { readFile, readdir, stat } from "node:fs/promises";
 import type { Dirent } from "node:fs";
-import { join, basename, extname } from "node:path";
+import { join, basename, dirname, extname } from "node:path";
 
 export interface FileWatchEvent {
   type: "create" | "update" | "delete" | "rename";
@@ -60,6 +60,20 @@ export interface JsonlWatchOptions {
   pollInterval?: number;
   includePattern?: RegExp;
   excludePattern?: RegExp;
+  /**
+   * Restrict the scan to one session: `<id>.jsonl` at the top level, and
+   * `<id>/subagents/*.jsonl` below it.
+   *
+   * The watch path is a project directory shared by every session in that
+   * project, while the process watching it serves one session. Without this
+   * every daemon read every transcript, so N sessions in a project meant each
+   * line parsed, scored and ingested N times.
+   *
+   * Not expressible as `includePattern`: a subagent file is named
+   * `agent-<agentId>.jsonl` and carries no session id. Ownership lives in the
+   * directory it sits in, which a name-based filter never sees.
+   */
+  sessionScope?: string;
 }
 
 export class CodeMemoryJsonlWatcher {
@@ -71,11 +85,15 @@ export class CodeMemoryJsonlWatcher {
   private isRunning = false;
 
   constructor(private deps: CodeMemoryDependencies, private options: JsonlWatchOptions = {}) {
+    // Spread first, then apply defaults. Rebuilding the object from an
+    // explicit key list silently dropped anything the list did not mention,
+    // which is how a new option can be declared, passed, typechecked, and
+    // still do nothing.
     this.options = {
+      ...this.options,
       watchPath: this.options.watchPath || this.getDefaultWatchPath(),
       pollInterval: this.options.pollInterval || 5000,
       includePattern: this.options.includePattern || /\.jsonl$/,
-      excludePattern: this.options.excludePattern,
     };
   }
 
@@ -142,6 +160,16 @@ export class CodeMemoryJsonlWatcher {
         // subagent ever made — including the failures, which is the one class
         // of memory that cannot be recovered from the repository afterwards.
         if (file.isDirectory()) {
+          // The directory name is the session id, so another session's
+          // subagents are skipped without even listing them. This is the only
+          // place ownership is visible -- the files inside are named
+          // `agent-<agentId>.jsonl` and say nothing about whose they are.
+          if (
+            this.options.sessionScope &&
+            file.name !== this.options.sessionScope
+          ) {
+            continue;
+          }
           await this.scanSubagentDirectory(join(watchPath, file.name));
           continue;
         }
@@ -194,6 +222,19 @@ export class CodeMemoryJsonlWatcher {
 
   private shouldWatchFile(filePath: string): boolean {
     const fileName = basename(filePath);
+
+    // Exact match, not a prefix: `<id>-backup.jsonl` starts with the session
+    // id and is not this session's transcript. Only files sitting directly in
+    // the watch path are checked -- subagent files arrive from
+    // scanSubagentDirectory, which has already vetted the directory they are
+    // in, and their own names carry no session id at all.
+    if (
+      this.options.sessionScope &&
+      dirname(filePath) === this.options.watchPath &&
+      fileName !== `${this.options.sessionScope}.jsonl`
+    ) {
+      return false;
+    }
 
     if (this.options.excludePattern && this.options.excludePattern.test(fileName)) {
       return false;
