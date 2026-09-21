@@ -224,10 +224,26 @@ export class ProjectWatcher {
       return;
     }
 
+    const candidates = entries
+      .filter((name) => name.endsWith(".jsonl"))
+      .map((name) => join(this.projectWatchPath, name));
+
+    // The watcher also reads `<sessionId>/subagents/agent-*.jsonl`, so those
+    // have to be written off too. Listing only the top level meant the first
+    // daemon on a session with existing subagents read every one of them from
+    // byte 0 -- 46 rows on the first 0.6.0 start, all already stored. Only
+    // this session's directory: no other is read, so none needs seeding.
+    const subagentDir = join(this.projectWatchPath, this.options.sessionId, "subagents");
+    try {
+      for (const name of await readdir(subagentDir)) {
+        if (name.endsWith(".jsonl")) candidates.push(join(subagentDir, name));
+      }
+    } catch {
+      // No subagents in this session yet.
+    }
+
     let seeded = 0;
-    for (const name of entries) {
-      if (!name.endsWith(".jsonl")) continue;
-      const filePath = join(this.projectWatchPath, name);
+    for (const filePath of candidates) {
       if (restored.has(filePath)) continue;
       const length = await this.watcher.currentLength(filePath);
       if (length > 0) {

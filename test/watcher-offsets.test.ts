@@ -169,3 +169,91 @@ describe("durable watcher offsets", () => {
     expect(second.length).toBe(3);
   });
 });
+
+describe("seeding covers subagent transcripts", () => {
+  // Seeding listed only the top level of the project directory, while the
+  // watcher also reads `<sessionId>/subagents/agent-*.jsonl`. The first
+  // 0.6.0 daemon on a live session therefore read all six of its existing
+  // subagent transcripts from byte 0: 46 rows, every one already stored by
+  // the previous daemon. The source-uuid index could not refuse them because
+  // the earlier copies predate the column and carry NULL.
+  const subLine = (i: number) =>
+    JSON.stringify({
+      uuid: `sub-${i}`,
+      type: "user",
+      message: { role: "user", content: `subagent line ${i}` },
+      sessionId: "sess-offsets",
+      agentId: "a1",
+      isSidechain: true,
+      timestamp: new Date().toISOString(),
+    }) + "\n";
+
+  let subagentDir: string;
+  beforeEach(() => {
+    subagentDir = join(projectDir, "sess-offsets", "subagents");
+    mkdirSync(subagentDir, { recursive: true });
+  });
+
+  it("does not replay a subagent transcript that was already on disk", async () => {
+    writeFileSync(join(subagentDir, "agent-a1.jsonl"), subLine(1) + subLine(2));
+
+    const seen = await runWatcher(makeStore(), true);
+    expect(seen).toEqual([]);
+  });
+
+  it("still reads what a pre-existing subagent transcript gains afterwards", async () => {
+    const file = join(subagentDir, "agent-a1.jsonl");
+    writeFileSync(file, subLine(1));
+
+    const seen: string[] = [];
+    const w = new ProjectWatcher(SILENT, {
+      projectPath: "/tmp/proj",
+      sessionId: "sess-offsets",
+      pollInterval: 50,
+      seedExistingFilesToEnd: true,
+      offsetStore: makeStore(),
+      onMessage: (m) => {
+        seen.push(m.id);
+      },
+    });
+    await w.start();
+    appendFileSync(file, subLine(2));
+    await new Promise((r) => setTimeout(r, 250));
+    await w.stop();
+
+    // Seeding writes off the past, not the file.
+    expect(seen).toEqual(["sub-2"]);
+  });
+
+  it("reads a subagent transcript created after start in full", async () => {
+    const seen: string[] = [];
+    const w = new ProjectWatcher(SILENT, {
+      projectPath: "/tmp/proj",
+      sessionId: "sess-offsets",
+      pollInterval: 50,
+      seedExistingFilesToEnd: true,
+      offsetStore: makeStore(),
+      onMessage: (m) => {
+        seen.push(m.id);
+      },
+    });
+    await w.start();
+    writeFileSync(join(subagentDir, "agent-b2.jsonl"), subLine(1) + subLine(2));
+    await new Promise((r) => setTimeout(r, 250));
+    await w.stop();
+
+    expect(seen).toEqual(["sub-1", "sub-2"]);
+  });
+
+  it("resumes a subagent transcript from its stored offset rather than seeding it", async () => {
+    const file = join(subagentDir, "agent-a1.jsonl");
+    writeFileSync(file, subLine(1));
+    const store = makeStore();
+    await runWatcher(store, false);
+
+    appendFileSync(file, subLine(2));
+    const seen = await runWatcher(store, true);
+    expect(seen).toContain("sub-2");
+    expect(seen).not.toContain("sub-1");
+  });
+});
