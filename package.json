@@ -1,6 +1,6 @@
 {
   "name": "codememory-for-claude",
-  "version": "0.6.1",
+  "version": "0.6.2",
   "description": "CodeMemory for Claude Code CLI",
   "type": "module",
   "main": "dist/plugin/index.js",
