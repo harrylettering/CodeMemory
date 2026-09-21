@@ -2468,9 +2468,19 @@ function staleReasonForNode(
   }
   // An old active task is stale rather than resolved: the transcript cannot
   // say whether it was finished or abandoned, only that nothing has referred
-  // to it in a long time. `lowUse` keeps a task that is still being recalled
-  // and used out of this branch, so a genuinely long-running goal survives.
-  if (node.kind === "task" && node.status === "active" && updatedAgeDays >= policy.activeTaskOlderThanDays && lowUse) {
+  // to it in a long time. A task used within the window survives, so a
+  // genuinely long-running goal stays current.
+  //
+  // Not `lowUse`, whose "not used since its last update" never becomes true
+  // for a task used after its last update, no matter how long ago that was.
+  // Every task from the era when each injection counted as use is in that
+  // state, with counts in the hundreds, and would have stayed current forever.
+  if (
+    node.kind === "task" &&
+    node.status === "active" &&
+    updatedAgeDays >= policy.activeTaskOlderThanDays &&
+    lastUsedAgeDays >= policy.activeTaskOlderThanDays
+  ) {
     return `active task untouched for ${Math.floor(updatedAgeDays)} days`;
   }
   return null;

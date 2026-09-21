@@ -198,12 +198,54 @@ const ERROR_RESULT_PATTERNS: RegExp[] = [
  * Check each result's raw content rather than the watcher-prefixed flattened
  * string, so line-anchored patterns like /^panic: /m actually fire.
  */
+/**
+ * CodeMemory's own rendered memory, as it appears when a tool result displays
+ * it: the check-prior-failures tool, a debugging query, a status command.
+ *
+ * That text quotes stored errors verbatim, so without this the patterns above
+ * read a displayed failure as a new one and the extractor stored it again --
+ * one live database held the same TS2322 four times, the latest written
+ * minutes after the previous copy was shown. Formats, and where they come from:
+ *
+ *   - (failure, active, score 2.48) [FAILURE] ...    memory-retrieval renderList
+ *   - (2-hop, score 1.9) ...                         memory-retrieval renderChainList
+ *   **type_error** — broken.ts (today)               failure-lookup renderFailureMarkdown
+ *   Attempted: ... / Error: ...                      (the lines under that header)
+ *
+ * Only these lines are removed; anything else in the same result is still
+ * checked, so a real error printed next to recalled memory is not lost.
+ * test/recall-echo.test.ts renders through the real functions, so changing
+ * either format fails there rather than quietly reopening the loop.
+ */
+const RENDERED_MEMORY_LINE = /^- \((?:[a-z_]+, [a-z_]+|\d+-hop), score -?[\d.]+\) .*$/gm;
+const RENDERED_FAILURE_BLOCK = /^\*\*[\w-]+\*\* — .*(?:\n(?:Attempted|Error): .*)*$/gm;
+
+/**
+ * The text of one tool result. Array content -- a list of blocks -- used to be
+ * JSON-stringified, which escapes every newline, so no line-anchored pattern
+ * could match inside it and neither could the rendered-memory filter.
+ */
+function resultText(content: unknown): string {
+  if (typeof content === "string") return content;
+  if (Array.isArray(content)) {
+    return content
+      .map((block: any) =>
+        block && typeof block.text === "string" ? block.text : ""
+      )
+      .join("\n");
+  }
+  return JSON.stringify(content ?? "");
+}
+
+function stripRenderedMemory(text: string): string {
+  return text.replace(RENDERED_MEMORY_LINE, "").replace(RENDERED_FAILURE_BLOCK, "");
+}
+
 function looksLikeErrorResult(
   results: Array<{ content?: unknown }>
 ): boolean {
   return results.some((r) => {
-    const text =
-      typeof r.content === "string" ? r.content : JSON.stringify(r.content ?? "");
+    const text = stripRenderedMemory(resultText(r.content));
     return ERROR_RESULT_PATTERNS.some((re) => re.test(text));
   });
 }

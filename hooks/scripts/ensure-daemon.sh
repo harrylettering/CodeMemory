@@ -25,8 +25,35 @@ TIMEOUT="${3:-${CODEMEMORY_DAEMON_HEALTH_TIMEOUT:-3}}"
 
 SOCKET_PATH="${HOME}/.claude/codememory-runtime/${SESSION_ID}.sock"
 
-# Already serving. This is the common case on every call after the first.
-[ -S "$SOCKET_PATH" ] && exit 0
+VERSION_PATH="${HOME}/.claude/codememory-runtime/${SESSION_ID}.version"
+
+# Already serving -- the common case on every call after the first -- but only
+# if the daemon behind the socket came from this plugin version. A live socket
+# used to be enough, and a plugin update plus /reload-plugins keeps the session
+# id, so the old version's socket stayed live and every new hook talked to the
+# old daemon. After the 0.6.0 install all 8 daemons on the machine still ran
+# 0.5.0 code. Nor would they leave by themselves: the idle exit that retires a
+# daemon is a newer feature than the daemons that need retiring.
+if [ -S "$SOCKET_PATH" ]; then
+  WANT=""
+  if [ -n "${CLAUDE_PLUGIN_ROOT:-}" ]; then
+    WANT=$(jq -r '.version // empty' "${CLAUDE_PLUGIN_ROOT}/.claude-plugin/plugin.json" 2>/dev/null)
+  fi
+  HAVE=$(cat "$VERSION_PATH" 2>/dev/null)
+  # An unreadable manifest keeps the running daemon: replacing on it would
+  # restart the daemon on every prompt. A missing version file does not --
+  # daemons older than the file never wrote one, and they are exactly the
+  # ones this check exists to replace.
+  if [ -z "$WANT" ] || [ "$HAVE" = "$WANT" ]; then
+    exit 0
+  fi
+  mkdir -p "${HOME}/.claude/codememory-logs"
+  node "${CLAUDE_PLUGIN_ROOT}/dist/hooks/daemon.js" stop "$SESSION_ID" \
+    >>"${HOME}/.claude/codememory-logs/daemon.log" 2>&1
+  # stop waits for the pid file to go; the socket only goes if the old daemon
+  # shut down cleanly, and a leftover would read as "already serving" below.
+  rm -f "$SOCKET_PATH" "$VERSION_PATH"
+fi
 
 if ! command -v node >/dev/null 2>&1; then
   echo "node is not on PATH"

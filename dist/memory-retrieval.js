@@ -25,9 +25,20 @@ export class MemoryRetrievalEngine {
             matchedTags: [],
         }))));
         const summaryEvidence = await this.buildSummaryEvidence(summaryCandidates, input.plan, Math.max(0, input.plan.recallPolicy.tokenBudget - selectedTokens - stitchedTokens));
+        // Use means the prompt asked for the node, not that it was injected. The
+        // planner adds `kind=task` (and other kind tags) to nearly every prompt,
+        // so counting injections let any active task count as used on every
+        // turn -- and staleness spares a node that is still being used. The
+        // shipped tasks it was meant to retire had use counts of 94 to 116.
+        // A chain node counts only when the node it was stitched from does.
+        const askedFor = new Set(selected
+            .filter((item) => item.matchedTags.some((tag) => tag.tagType !== "kind"))
+            .map((item) => item.node.nodeId));
         await this.memoryStore.markUsed(Array.from(new Set([
-            ...selected.map((item) => item.node.nodeId),
-            ...stitchedChains.flatMap((chain) => chain.nodes.map((node) => node.nodeId)),
+            ...askedFor,
+            ...stitchedChains
+                .filter((chain) => chain.anchorNodeIds.some((id) => askedFor.has(id)))
+                .flatMap((chain) => chain.nodes.map((node) => node.nodeId)),
         ])));
         const estimatedTokens = selectedTokens +
             stitchedTokens +
@@ -448,7 +459,9 @@ function renderSummaryEvidence(evidence) {
     const parts = [];
     if (evidence.children.length > 0) {
         const children = evidence.children
-            .map((child) => `${child.summaryId}: ${child.content}`)
+            // Collapsed like the node snippet: one rendered node is one line,
+            // which is what lets the scorer recognize and skip its own output.
+            .map((child) => `${child.summaryId}: ${child.content.replace(/\s+/g, " ")}`)
             .join(" | ");
         parts.push(`child summaries: ${children}`);
     }
