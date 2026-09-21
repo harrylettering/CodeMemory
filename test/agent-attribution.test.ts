@@ -378,3 +378,64 @@ describe("the mark path carries attribution all the way down", () => {
     expect(row.producerAgentId).toBeNull();
   });
 });
+
+describe("telemetry keeps the old question answerable", () => {
+  it("sets the boolean and the id together on a new row", async () => {
+    // `subagent` predates the id column and is the only signal rows written
+    // before it carry. Writing both keeps a count over either one agreeing on
+    // new rows, so the upgrade does not double-count.
+    const store = createMemoryNodeStore(db);
+    await store.recordIngestion({
+      conversationId: 1,
+      sessionId: "sess-A",
+      messageId: 1,
+      role: "assistant",
+      tier: "S",
+      rawChars: 10,
+      storedChars: 10,
+      stored: true,
+      producerAgentId: "a46733a66c860abb9",
+      producerPromptId: "83be3dd3",
+    } as any);
+
+    const row = await db.get("SELECT subagent, producerAgentId FROM ingestion_events");
+    expect(row.subagent).toBe(1);
+    expect(row.producerAgentId).toBe("a46733a66c860abb9");
+  });
+
+  it("leaves a main-agent row at 0 and NULL", async () => {
+    const store = createMemoryNodeStore(db);
+    await store.recordIngestion({
+      conversationId: 1,
+      sessionId: "sess-A",
+      messageId: 2,
+      role: "user",
+      tier: "S",
+      rawChars: 10,
+      storedChars: 10,
+      stored: true,
+    } as any);
+
+    const row = await db.get("SELECT subagent, producerAgentId FROM ingestion_events");
+    expect(row.subagent).toBe(0);
+    expect(row.producerAgentId).toBeNull();
+  });
+
+  it("still reads a row that predates the id column", async () => {
+    // Simulates the 83 live rows carrying only the boolean. They must keep
+    // counting as subagent traffic rather than silently disappearing.
+    await db.run(
+      `INSERT INTO ingestion_events
+         (conversationId, sessionId, role, tier, rawChars, storedChars, stored, subagent, createdAt)
+       VALUES (1, 'sess-A', 'assistant', 'S', 10, 10, 1, 1, ?)`,
+      [new Date().toISOString()]
+    );
+
+    const counted = await db.get(
+      `SELECT SUM(producerAgentId IS NOT NULL) withId, COUNT(*) tot
+         FROM ingestion_events WHERE producerAgentId IS NOT NULL OR subagent = 1`
+    );
+    expect(counted.tot).toBe(1);
+    expect(counted.withId).toBe(0);
+  });
+});

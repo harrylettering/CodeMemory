@@ -1220,13 +1220,17 @@ export class MemoryNodeStore {
     storedChars: number;
     stored: boolean;
     subagent?: boolean;
+    /** Which subagent; absent means the main agent, as everywhere else. */
+    producerAgentId?: string;
+    producerPromptId?: string;
   }): Promise<void> {
     try {
       await this.db.run(
         `INSERT INTO ingestion_events (
            conversationId, sessionId, messageId, role, tier, tags,
-           rawChars, storedChars, stored, subagent, createdAt
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           rawChars, storedChars, stored, subagent,
+           producerAgentId, producerPromptId, createdAt
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           input.conversationId ?? null,
           input.sessionId ?? null,
@@ -1237,7 +1241,11 @@ export class MemoryNodeStore {
           input.rawChars,
           input.storedChars,
           input.stored ? 1 : 0,
-          input.subagent ? 1 : 0,
+          // Kept in step with the id so the old boolean question stays
+          // answerable on new rows without a second source of truth.
+          input.subagent || input.producerAgentId ? 1 : 0,
+          input.producerAgentId ?? null,
+          input.producerPromptId ?? null,
           new Date().toISOString(),
         ]
       );

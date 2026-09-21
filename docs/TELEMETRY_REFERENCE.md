@@ -143,7 +143,9 @@ dropped before any write, so nothing else records that it was ever seen.
 | `rawChars` | Size as it arrived, before scoring compressed it |
 | `storedChars` | Size actually persisted. M and L keep metadata, not text |
 | `stored` | 0 for an N-tier drop |
-| `subagent` | 1 when the message came from a subagent transcript |
+| `subagent` | 1 when the message came from a subagent transcript. Predates `producerAgentId` and is still written alongside it, so a count over either agrees on new rows |
+| `producerAgentId` | Which subagent, or NULL for the main agent. Rows written before this column have the boolean only |
+| `producerPromptId` | The dispatch it belonged to; what separates two subagents launched in one turn |
 
 **Derived:** drop rate; drop reasons ranked by tag; character retention per
 tier; subagent share of traffic. A single tag dominating the drops reads

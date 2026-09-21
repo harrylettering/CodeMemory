@@ -648,6 +648,8 @@ async function startDaemon(args) {
                         storedChars: 0,
                         stored: false,
                         subagent: isSubagent,
+                        producerAgentId: message.agentId,
+                        producerPromptId: message.promptId,
                     });
                     logger.debug(`Dropping ${message.role} message (N tier, tags=${score.tags.join(",")})`);
                     return;
@@ -684,6 +686,8 @@ async function startDaemon(args) {
                     storedChars: (score.content || "").length,
                     stored: true,
                     subagent: isSubagent,
+                    producerAgentId: message.agentId,
+                    producerPromptId: message.promptId,
                 });
                 try {
                     await fixAttemptTracker.observeToolUses(message, {

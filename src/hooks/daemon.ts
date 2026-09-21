@@ -759,6 +759,8 @@ async function startDaemon(args: string[]) {
             storedChars: 0,
             stored: false,
             subagent: isSubagent,
+            producerAgentId: message.agentId,
+            producerPromptId: message.promptId,
           });
           logger.debug(
             `Dropping ${message.role} message (N tier, tags=${score.tags.join(",")})`
@@ -803,6 +805,8 @@ async function startDaemon(args: string[]) {
           storedChars: (score.content || "").length,
           stored: true,
           subagent: isSubagent,
+            producerAgentId: message.agentId,
+            producerPromptId: message.promptId,
         });
 
         try {

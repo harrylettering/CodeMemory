@@ -940,6 +940,19 @@ export async function runCodeMemoryMigrations(db: any): Promise<void> {
       WHERE producerAgentId IS NOT NULL
   `);
 
+  // Migration 35: telemetry gains the same attribution the data has.
+  //
+  // ingestion_events.subagent was a boolean, which answers "was this a
+  // subagent" and nothing else -- not which one, and not whether two ran at
+  // once. It stays, both because rows written before this carry it as their
+  // only signal and because it is cheap to keep the older question answerable.
+  //
+  // New writes set both, so a count over `subagent` and a count over
+  // `producerAgentId IS NOT NULL` agree on new rows rather than double-counting
+  // them; only the historical rows differ, by having no agent id to report.
+  await addColumnIfMissing(db, "ingestion_events", "producerAgentId", "TEXT");
+  await addColumnIfMissing(db, "ingestion_events", "producerPromptId", "TEXT");
+
   console.log(`[codememory] Database migrations completed successfully`);
 }
 

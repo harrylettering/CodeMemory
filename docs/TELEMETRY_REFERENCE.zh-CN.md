@@ -118,7 +118,9 @@
 | `rawChars` | 进来时的大小，打分压缩之前 |
 | `storedChars` | 实际落库的大小。M 和 L 存的是元数据，不是正文 |
 | `stored` | N 档丢弃为 0 |
-| `subagent` | 为 1 表示来自 subagent 的 transcript |
+| `subagent` | 为 1 表示来自 subagent 的 transcript。早于 `producerAgentId`，现在两者一起写，所以按任一列统计新行结果一致 |
+| `producerAgentId` | 是哪个子 agent，主 agent 为 NULL。此列之前的行只有布尔标记 |
+| `producerPromptId` | 属于哪一轮派发；同一轮派出的两个子 agent 靠它区分 |
 
 **衍生指标：** 丢弃率；按 tag 排序的丢弃原因；各档的字符留存率；subagent 流量占比。**某一个 tag 在丢弃里占绝对多数**，既可能是过滤器正常工作，也可能是某条规则下手太重，只有翻原始 transcript 才能判断。
 
