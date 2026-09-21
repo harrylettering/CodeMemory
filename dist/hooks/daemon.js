@@ -29,6 +29,7 @@ import { FixAttemptTracker } from "../fix-attempt-tracker.js";
 import { AsyncCompactor } from "../compaction/compactor.js";
 import { CodeMemoryMarkDecisionTool } from "../tools/codememory-mark-decision-tool.js";
 import { CodeMemoryMarkRequirementTool } from "../tools/codememory-mark-requirement-tool.js";
+import { pluginRootFromHooksDir, readPluginVersion } from "./daemon-version.js";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // Simple logger
 const logger = {
@@ -64,6 +65,9 @@ function getPidFilePath(sessionId) {
 }
 function getSocketPath(sessionId) {
     return path.join(getRuntimeDir(), `${sessionId}.sock`);
+}
+function getVersionPath(sessionId) {
+    return path.join(getRuntimeDir(), `${sessionId}.version`);
 }
 async function startDaemon(args) {
     const sessionId = args[0];
@@ -146,6 +150,7 @@ async function startDaemon(args) {
         // every tool call. Falls back to retrieve-cli.ts if the socket is
         // missing or unresponsive.
         const socketPath = getSocketPath(sessionId);
+        const versionPath = getVersionPath(sessionId);
         if (fs.existsSync(socketPath)) {
             try {
                 fs.unlinkSync(socketPath);
@@ -535,6 +540,18 @@ async function startDaemon(args) {
                 /* ignore */
             }
             logger.info(`Lookup socket listening at ${socketPath}`);
+            // Written only once the bind has succeeded, so the loser of a spawn
+            // race never claims a version. ensure-daemon.sh compares this with the
+            // installed plugin and replaces a daemon from any other version.
+            const version = readPluginVersion(pluginRootFromHooksDir(__dirname));
+            if (version) {
+                try {
+                    fs.writeFileSync(versionPath, version, "utf-8");
+                }
+                catch (err) {
+                    logger.warn(`Could not record daemon version: ${err}`);
+                }
+            }
         });
         // Per-session extractor/scorer states. Exploration targets persist
         // across daemon restarts via SQLite (see filter/explored-targets-store),
@@ -1146,6 +1163,12 @@ async function startDaemon(args) {
             }
             if (fs.existsSync(pidFile)) {
                 fs.unlinkSync(pidFile);
+            }
+            try {
+                fs.unlinkSync(versionPath);
+            }
+            catch {
+                /* never written, or already gone */
             }
             await db.close();
             logger.info("Daemon stopped");
