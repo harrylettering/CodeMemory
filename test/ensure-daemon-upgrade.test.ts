@@ -62,6 +62,11 @@ function makePluginRoot(version: string): string {
   // The stub is CommonJS; the repo's package.json says "type": "module".
   fs.writeFileSync(path.join(root, "dist", "hooks", "daemon.js"), STUB);
   fs.writeFileSync(path.join(root, "dist", "hooks", "package.json"), '{"type":"commonjs"}');
+  // The real hook scripts, so a test can go through the path a prompt takes
+  // rather than calling ensure-daemon.sh directly.
+  fs.cpSync(path.resolve(__dirname, "../hooks/scripts"), path.join(root, "hooks", "scripts"), {
+    recursive: true,
+  });
   return root;
 }
 
@@ -164,6 +169,48 @@ describe("ensure-daemon.sh across a plugin upgrade", () => {
 
     expect(ensure(root)).toBe(0);
     expect(daemonPid()).toBe(first);
+  });
+});
+
+describe("the prompt hook across a plugin upgrade", () => {
+  // ensure-daemon.sh checked the version, but user-prompt-submit.sh only
+  // called it when the socket was missing -- and after /reload-plugins the
+  // old socket is live. The check never ran on the path an upgrade takes:
+  // after installing 0.6.1 and sending a prompt, this session's daemon was
+  // still the 0.6.0 one. Testing the script alone could not see that.
+  function prompt(pluginRoot: string): void {
+    execFileSync("bash", [path.join(pluginRoot, "hooks", "scripts", "user-prompt-submit.sh")], {
+      env: { ...process.env, HOME: home, CLAUDE_PLUGIN_ROOT: pluginRoot },
+      input: JSON.stringify({ session_id: SID, prompt: "hello", cwd: home }),
+      stdio: "pipe",
+    });
+  }
+
+  it("replaces an old daemon whose socket is still live", () => {
+    const oldRoot = makePluginRoot("0.5.0");
+    const newRoot = makePluginRoot("0.6.1");
+    expect(ensure(oldRoot)).toBe(0);
+    const oldPid = daemonPid();
+    expect(fs.existsSync(runtime(`${SID}.sock`))).toBe(true);
+
+    prompt(newRoot);
+
+    const newPid = daemonPid();
+    expect(newPid).not.toBe(oldPid);
+    expect(alive(oldPid)).toBe(false);
+    expect(fs.readFileSync(runtime(`${SID}.version`), "utf8")).toBe("0.6.1");
+  });
+
+  it("keeps a current daemon across prompts", () => {
+    const root = makePluginRoot("0.6.1");
+    expect(ensure(root)).toBe(0);
+    const pid = daemonPid();
+
+    prompt(root);
+    prompt(root);
+
+    expect(daemonPid()).toBe(pid);
+    expect(alive(pid)).toBe(true);
   });
 });
 
