@@ -55,25 +55,30 @@ if ! command -v curl >/dev/null 2>&1; then
   exit 0
 fi
 
-if [ ! -S "$SOCKET_PATH" ]; then
-  # Budget is deliberately shorter than SessionStart's. This runs between the
-  # user pressing enter and the model starting, so a daemon that cannot come
-  # up quickly is not worth waiting for -- it will be retried next prompt, and
-  # nothing is lost meanwhile because read positions are durable.
-  CWD=$(printf '%s' "$INPUT" | jq -r '.cwd // ""')
-  if [ -z "${CLAUDE_PLUGIN_ROOT:-}" ]; then
-    echo "[$(date -Iseconds)] no socket and no CLAUDE_PLUGIN_ROOT" >> "$LOG_FILE"
-    emit_noop
-    exit 0
-  fi
-  if REASON=$("${CLAUDE_PLUGIN_ROOT}/hooks/scripts/ensure-daemon.sh" \
+# Called on every prompt, not only when the socket is missing. ensure-daemon.sh
+# also replaces a daemon from another plugin version, and after an update plus
+# /reload-plugins that old daemon's socket is live -- guarding the call on a
+# missing socket meant the replacement never ran on the path an upgrade takes.
+# When the daemon is current the script returns after a stat and two reads.
+#
+# Budget is deliberately shorter than SessionStart's. This runs between the
+# user pressing enter and the model starting, so a daemon that cannot come up
+# quickly is not worth waiting for -- it will be retried next prompt, and
+# nothing is lost meanwhile because read positions are durable.
+CWD=$(printf '%s' "$INPUT" | jq -r '.cwd // ""')
+if [ -n "${CLAUDE_PLUGIN_ROOT:-}" ]; then
+  if ! REASON=$("${CLAUDE_PLUGIN_ROOT}/hooks/scripts/ensure-daemon.sh" \
         "$SESSION_ID" "$CWD" "${CODEMEMORY_RESPAWN_TIMEOUT:-1.5}" 2>>"$LOG_FILE"); then
-    echo "[$(date -Iseconds)] respawned daemon for $SESSION_ID" >> "$LOG_FILE"
-  else
-    echo "[$(date -Iseconds)] no socket and respawn failed: ${REASON:-unknown}" >> "$LOG_FILE"
+    echo "[$(date -Iseconds)] daemon not ready: ${REASON:-unknown}" >> "$LOG_FILE"
     emit_noop
     exit 0
   fi
+elif [ ! -S "$SOCKET_PATH" ]; then
+  # Without the plugin root nothing can be spawned or replaced; a live socket
+  # is still worth using.
+  echo "[$(date -Iseconds)] no socket and no CLAUDE_PLUGIN_ROOT" >> "$LOG_FILE"
+  emit_noop
+  exit 0
 fi
 
 PAYLOAD=$(jq -nc --arg prompt "$PROMPT" '{prompt: $prompt}')
