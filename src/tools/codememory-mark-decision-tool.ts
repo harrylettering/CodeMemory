@@ -19,6 +19,13 @@ import type { ConversationStore } from "../store/conversation-store.js";
 import type { MemoryNodeStore } from "../store/memory-store.js";
 
 export interface CodeMemoryMarkDecisionParams {
+  /**
+   * The subagent that made this mark, resolved by the daemon from the tool
+   * call that produced it. Never taken from the model: an identity the caller
+   * supplies is an identity the caller can forge.
+   */
+  producerAgentId?: string;
+  producerPromptId?: string;
   /** What was decided. One sentence, imperative-ish. */
   decision: string;
   /** Why this decision was made. */
@@ -84,6 +91,8 @@ export class CodeMemoryMarkDecisionTool {
     const content = renderDecisionContent(params);
 
     const memoryNode = await this.memoryStore.createDecisionNode({
+      producerAgentId: params.producerAgentId,
+      producerPromptId: params.producerPromptId,
       conversationId: conversation.conversationId,
       sessionId,
       sourceToolUseId: params.sourceToolUseId ?? null,

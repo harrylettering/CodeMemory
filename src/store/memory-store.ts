@@ -192,6 +192,16 @@ export interface FailureAnchorCandidate {
 }
 
 export interface UpsertMemoryNodeInput {
+  /**
+   * The subagent that produced this node, absent for the main agent.
+   *
+   * Inherited from the message that triggered the write, never read from a
+   * global "current agent" -- concurrent subagents make any such global wrong
+   * by construction.
+   */
+  producerAgentId?: string;
+  /** The dispatch it belongs to; separates subagents launched in one turn. */
+  producerPromptId?: string;
   nodeId: string;
   kind: MemoryNodeKind;
   status?: MemoryNodeStatus;
@@ -255,6 +265,12 @@ export interface StaleMaintenanceResult {
 
 export interface CreateFailureNodeInput {
   conversationId: number;
+  /**
+   * Inherited from the message whose error text produced this node, so a
+   * failure a subagent hit is attributable to that subagent.
+   */
+  producerAgentId?: string;
+  producerPromptId?: string;
   sessionId?: string | null;
   /** Conversation seq of the failure occurrence — used for auto-resolve windows. */
   seq: number;
@@ -295,6 +311,9 @@ export interface AutoResolveStaleFailureNodesInput {
 }
 
 export interface CreateFixAttemptNodeInput {
+  /** Inherited from the message this attempt was observed on. */
+  producerAgentId?: string;
+  producerPromptId?: string;
   attemptId: string;
   conversationId: number;
   sessionId?: string | null;
@@ -311,6 +330,9 @@ export interface CreateFixAttemptNodeInput {
 }
 
 export interface CreateTaskNodeInput {
+  /** The agent that produced this node; absent means the main agent. */
+  producerAgentId?: string;
+  producerPromptId?: string;
   conversationId: number;
   sessionId?: string | null;
   /** Legacy anchor — only used for nodeId derivation when no toolUseId. */
@@ -326,6 +348,9 @@ export interface CreateTaskNodeInput {
 }
 
 export interface CreateConstraintNodeInput {
+  /** The agent that produced this node; absent means the main agent. */
+  producerAgentId?: string;
+  producerPromptId?: string;
   conversationId: number;
   sessionId?: string | null;
   messageId?: number | null;
@@ -365,8 +390,9 @@ export class MemoryNodeStore {
       `INSERT INTO memory_nodes (
          nodeId, kind, status, confidence, conversationId, sessionId,
          source, sourceId, sourceToolUseId, summaryId, content, metadata,
-         supersedesNodeId, createdAt, updatedAt
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         supersedesNodeId, producerAgentId, producerPromptId,
+         createdAt, updatedAt
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(nodeId) DO UPDATE SET
          kind = excluded.kind,
          status = excluded.status,
@@ -395,6 +421,8 @@ export class MemoryNodeStore {
         quality.content,
         metadata,
         input.supersedesNodeId ?? null,
+        input.producerAgentId ?? null,
+        input.producerPromptId ?? null,
         now,
         now,
       ]
@@ -1192,13 +1220,17 @@ export class MemoryNodeStore {
     storedChars: number;
     stored: boolean;
     subagent?: boolean;
+    /** Which subagent; absent means the main agent, as everywhere else. */
+    producerAgentId?: string;
+    producerPromptId?: string;
   }): Promise<void> {
     try {
       await this.db.run(
         `INSERT INTO ingestion_events (
            conversationId, sessionId, messageId, role, tier, tags,
-           rawChars, storedChars, stored, subagent, createdAt
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           rawChars, storedChars, stored, subagent,
+           producerAgentId, producerPromptId, createdAt
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           input.conversationId ?? null,
           input.sessionId ?? null,
@@ -1209,7 +1241,11 @@ export class MemoryNodeStore {
           input.rawChars,
           input.storedChars,
           input.stored ? 1 : 0,
-          input.subagent ? 1 : 0,
+          // Kept in step with the id so the old boolean question stays
+          // answerable on new rows without a second source of truth.
+          input.subagent || input.producerAgentId ? 1 : 0,
+          input.producerAgentId ?? null,
+          input.producerPromptId ?? null,
           new Date().toISOString(),
         ]
       );
@@ -1425,6 +1461,9 @@ export class MemoryNodeStore {
   }
 
   async createDecisionNode(input: {
+  /** The agent that produced this node; absent means the main agent. */
+  producerAgentId?: string;
+  producerPromptId?: string;
     conversationId: number;
     sessionId?: string | null;
     /** Legacy anchor for tests that pre-date the Skill→daemon flow. */
@@ -1454,6 +1493,8 @@ export class MemoryNodeStore {
       typeof input.messageId === "number" ? input.messageId : null;
 
     const node = await this.upsertNode({
+      producerAgentId: input.producerAgentId,
+      producerPromptId: input.producerPromptId,
       nodeId,
       kind: "decision",
       status: "active",
@@ -1648,6 +1689,8 @@ export class MemoryNodeStore {
       input.nodeIdOverride ?? `failure-${input.conversationId}-${input.seq}`;
 
     return this.upsertNode({
+      producerAgentId: input.producerAgentId,
+      producerPromptId: input.producerPromptId,
       nodeId,
       kind: "failure",
       status: "active",
@@ -1808,6 +1851,8 @@ export class MemoryNodeStore {
           ];
 
     const node = await this.upsertNode({
+      producerAgentId: input.producerAgentId,
+      producerPromptId: input.producerPromptId,
       nodeId: `fix-attempt-${input.attemptId}`,
       kind: "fix_attempt",
       status,
@@ -1846,6 +1891,8 @@ export class MemoryNodeStore {
 
   async createTaskNode(input: CreateTaskNodeInput): Promise<MemoryNodeRecord> {
     return this.createRequirementLikeNode({
+      producerAgentId: input.producerAgentId,
+      producerPromptId: input.producerPromptId,
       nodeId: requirementNodeId("task", input.sourceToolUseId, input.messageId),
       kind: "task",
       conversationId: input.conversationId,
@@ -1868,6 +1915,8 @@ export class MemoryNodeStore {
     input: CreateConstraintNodeInput
   ): Promise<MemoryNodeRecord> {
     return this.createRequirementLikeNode({
+      producerAgentId: input.producerAgentId,
+      producerPromptId: input.producerPromptId,
       nodeId: requirementNodeId(
         "constraint",
         input.sourceToolUseId,
@@ -1958,6 +2007,9 @@ export class MemoryNodeStore {
   }
 
   private async createRequirementLikeNode(input: {
+    /** The agent that produced this node; absent means the main agent. */
+    producerAgentId?: string;
+    producerPromptId?: string;
     nodeId: string;
     kind: "task" | "constraint";
     conversationId: number;
@@ -1996,6 +2048,8 @@ export class MemoryNodeStore {
       typeof input.messageId === "number" ? input.messageId : null;
 
     const node = await this.upsertNode({
+      producerAgentId: input.producerAgentId,
+      producerPromptId: input.producerPromptId,
       nodeId: input.nodeId,
       kind: input.kind,
       status: "active",

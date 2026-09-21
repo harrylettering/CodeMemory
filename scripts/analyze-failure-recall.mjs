@@ -415,5 +415,59 @@ if (hasExtractionEvents) {
   }
 }
 
+// ---- 12. agent 归属 --------------------------------------------------------
+// 子 agent 能写记忆（mark_decision 就是个普通工具），而在此之前它写的东西
+// 和主 agent 深思熟虑的产物在库里长得一模一样。读不到只是少信息，写进去
+// 分不清是污染判断依据本身。
+const hasProducer = await db.get(
+  `SELECT 1 ok FROM pragma_table_info('memory_nodes') WHERE name = 'producerAgentId'`
+);
+if (hasProducer) {
+  console.log("\n⑫ agent 归属  —— 哪些记忆是子 agent 写的");
+
+  const nodes = await db.all(
+    `SELECT kind,
+            SUM(producerAgentId IS NULL) mainAgent,
+            SUM(producerAgentId IS NOT NULL) subAgent,
+            COUNT(DISTINCT producerAgentId) agents
+       FROM memory_nodes GROUP BY kind ORDER BY kind`
+  );
+  const anyAttributed = nodes.some((r) => r.subAgent > 0);
+  if (!anyAttributed) {
+    line("已归属节点", "0（埋点已就绪；存量行无法回溯归属，只有新数据会带）");
+  } else {
+    for (const r of nodes) {
+      if (r.subAgent === 0) continue;
+      line(
+        `  ${r.kind}`,
+        `主 agent ${r.mainAgent}   子 agent ${r.subAgent}   来自 ${r.agents} 个 agent`
+      );
+    }
+    // 最值得看的一行：子 agent 顺手标的决策和约束，和主 agent 的混在一起。
+    const written = await db.get(
+      `SELECT COUNT(*) n FROM memory_nodes
+        WHERE producerAgentId IS NOT NULL AND kind IN ('decision','constraint')`
+    );
+    line("子 agent 写下的决策/约束", String(written?.n ?? 0));
+  }
+
+  const msgs = await db.get(
+    `SELECT SUM(producerAgentId IS NOT NULL) sub, COUNT(*) tot
+       FROM ingestion_events WHERE producerAgentId IS NOT NULL OR subagent = 1`
+  );
+  if (msgs?.tot) {
+    line("子 agent 消息", `${msgs.sub ?? 0} 条带 agent id / ${msgs.tot} 条标记为 subagent`);
+    line("  差值", `${msgs.tot - (msgs.sub ?? 0)} 条是升级前写的，只有布尔标记`);
+  }
+
+  // 并行派发：同一 promptId 下多个 agentId，是"互相串味"风险真正存在的证据。
+  const parallel = await db.all(
+    `SELECT producerPromptId p, COUNT(DISTINCT producerAgentId) agents
+       FROM memory_nodes WHERE producerPromptId IS NOT NULL
+      GROUP BY 1 HAVING COUNT(DISTINCT producerAgentId) > 1`
+  );
+  line("并行派发的轮次", parallel.length === 0 ? "0（尚未观察到）" : String(parallel.length));
+}
+
 await db.close();
 console.log("");

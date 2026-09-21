@@ -50,6 +50,8 @@ export class CodeMemoryMarkDecisionTool {
         });
         const content = renderDecisionContent(params);
         const memoryNode = await this.memoryStore.createDecisionNode({
+            producerAgentId: params.producerAgentId,
+            producerPromptId: params.producerPromptId,
             conversationId: conversation.conversationId,
             sessionId,
             sourceToolUseId: params.sourceToolUseId ?? null,

@@ -12,6 +12,13 @@ import type { ConversationStore } from "../store/conversation-store.js";
 import type { MemoryNodeStore } from "../store/memory-store.js";
 
 export interface CodeMemoryMarkRequirementParams {
+  /**
+   * The subagent that made this mark, resolved by the daemon from the tool
+   * call that produced it. Never taken from the model: an identity the caller
+   * supplies is an identity the caller can forge.
+   */
+  producerAgentId?: string;
+  producerPromptId?: string;
   /** Durable requirement kind. */
   kind: "task" | "constraint";
   /** The task or constraint itself. */
@@ -78,6 +85,8 @@ export class CodeMemoryMarkRequirementTool {
     const memoryNode =
       kind === "task"
         ? await this.memoryStore.createTaskNode({
+      producerAgentId: params.producerAgentId,
+      producerPromptId: params.producerPromptId,
             conversationId: conversation.conversationId,
             sessionId,
             sourceToolUseId: params.sourceToolUseId ?? null,
@@ -88,6 +97,8 @@ export class CodeMemoryMarkRequirementTool {
             supersedesNodeId: params.supersedesNodeId,
           })
         : await this.memoryStore.createConstraintNode({
+      producerAgentId: params.producerAgentId,
+      producerPromptId: params.producerPromptId,
             conversationId: conversation.conversationId,
             sessionId,
             sourceToolUseId: params.sourceToolUseId ?? null,

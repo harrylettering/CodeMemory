@@ -40,6 +40,17 @@ export interface JsonlMessage {
    * than storing a duplicate.
    */
   sourceUuid?: string;
+  /**
+   * The subagent that produced this entry, absent on main-agent entries.
+   * Absence is the identity, so this stays undefined rather than being
+   * defaulted to a sentinel.
+   */
+  agentId?: string;
+  /**
+   * The dispatch this entry belongs to. Two subagents launched in one turn
+   * share it and differ by agentId, so it is what separates them later.
+   */
+  promptId?: string;
   type: string;
   content: string;
   role: string;
@@ -466,6 +477,8 @@ export class CodeMemoryJsonlWatcher {
     return {
       id: raw.uuid ?? `${raw.sessionId ?? "unknown"}-${ts}`,
       sourceUuid: typeof raw.uuid === "string" && raw.uuid ? raw.uuid : undefined,
+      agentId: typeof raw.agentId === "string" && raw.agentId ? raw.agentId : undefined,
+      promptId: typeof raw.promptId === "string" && raw.promptId ? raw.promptId : undefined,
       type: raw.type,
       role: msg.role ?? raw.type,
       content,

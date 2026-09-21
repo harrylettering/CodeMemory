@@ -897,6 +897,62 @@ export async function runCodeMemoryMigrations(db: any): Promise<void> {
       WHERE sourceUuid IS NOT NULL
   `);
 
+  // Migration 33: record which agent produced a message.
+  //
+  // A subagent's work is ingested into the parent conversation -- correctly,
+  // it is the parent's work -- but nothing said which agent did it. The only
+  // marker was a `sidechain` tag: a boolean that cannot separate two
+  // concurrent subagents and never reached memory_nodes at all.
+  //
+  // Nullable, and NULL means the main agent. That is not a default standing in
+  // for missing data: real main-agent transcript entries carry no agentId, so
+  // absence is the identity. Same convention as sourceUuid.
+  //
+  // promptId is not redundant. Two subagents dispatched in one turn share a
+  // promptId and differ by agentId, so the pair is the identity and the
+  // promptId half is what makes a concurrent dispatch separable afterwards.
+  await addColumnIfMissing(db, "conversation_messages", "producerAgentId", "TEXT");
+  await addColumnIfMissing(db, "conversation_messages", "producerPromptId", "TEXT");
+
+  await db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_conversation_messages_producer
+      ON conversation_messages(conversationId, producerAgentId)
+      WHERE producerAgentId IS NOT NULL
+  `);
+
+  // Migration 34: record which agent produced a memory node.
+  //
+  // Migration 33 covers messages; this is the half that matters more. A
+  // subagent can call codememory_mark_decision, and what it writes lands in
+  // the parent conversation looking exactly like a decision the main agent
+  // deliberated over. Failing to read something costs information; failing to
+  // tell writes apart corrupts the basis for judgement.
+  //
+  // NULL is the main agent, matching migration 33 and sourceUuid: real
+  // main-agent transcript entries carry no agentId, so absence is the identity
+  // rather than a default standing in for missing data.
+  await addColumnIfMissing(db, "memory_nodes", "producerAgentId", "TEXT");
+  await addColumnIfMissing(db, "memory_nodes", "producerPromptId", "TEXT");
+
+  await db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_memory_nodes_producer
+      ON memory_nodes(conversationId, producerAgentId)
+      WHERE producerAgentId IS NOT NULL
+  `);
+
+  // Migration 35: telemetry gains the same attribution the data has.
+  //
+  // ingestion_events.subagent was a boolean, which answers "was this a
+  // subagent" and nothing else -- not which one, and not whether two ran at
+  // once. It stays, both because rows written before this carry it as their
+  // only signal and because it is cheap to keep the older question answerable.
+  //
+  // New writes set both, so a count over `subagent` and a count over
+  // `producerAgentId IS NOT NULL` agree on new rows rather than double-counting
+  // them; only the historical rows differ, by having no agent id to report.
+  await addColumnIfMissing(db, "ingestion_events", "producerAgentId", "TEXT");
+  await addColumnIfMissing(db, "ingestion_events", "producerPromptId", "TEXT");
+
   console.log(`[codememory] Database migrations completed successfully`);
 }
 

@@ -19,8 +19,9 @@ export class MemoryNodeStore {
         await this.db.run(`INSERT INTO memory_nodes (
          nodeId, kind, status, confidence, conversationId, sessionId,
          source, sourceId, sourceToolUseId, summaryId, content, metadata,
-         supersedesNodeId, createdAt, updatedAt
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         supersedesNodeId, producerAgentId, producerPromptId,
+         createdAt, updatedAt
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(nodeId) DO UPDATE SET
          kind = excluded.kind,
          status = excluded.status,
@@ -48,6 +49,8 @@ export class MemoryNodeStore {
             quality.content,
             metadata,
             input.supersedesNodeId ?? null,
+            input.producerAgentId ?? null,
+            input.producerPromptId ?? null,
             now,
             now,
         ]);
@@ -672,8 +675,9 @@ export class MemoryNodeStore {
         try {
             await this.db.run(`INSERT INTO ingestion_events (
            conversationId, sessionId, messageId, role, tier, tags,
-           rawChars, storedChars, stored, subagent, createdAt
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, [
+           rawChars, storedChars, stored, subagent,
+           producerAgentId, producerPromptId, createdAt
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, [
                 input.conversationId ?? null,
                 input.sessionId ?? null,
                 input.messageId ?? null,
@@ -683,7 +687,11 @@ export class MemoryNodeStore {
                 input.rawChars,
                 input.storedChars,
                 input.stored ? 1 : 0,
-                input.subagent ? 1 : 0,
+                // Kept in step with the id so the old boolean question stays
+                // answerable on new rows without a second source of truth.
+                input.subagent || input.producerAgentId ? 1 : 0,
+                input.producerAgentId ?? null,
+                input.producerPromptId ?? null,
                 new Date().toISOString(),
             ]);
         }
@@ -829,6 +837,8 @@ export class MemoryNodeStore {
             (input.messageId != null ? String(input.messageId) : nodeId);
         const evidenceMessageId = typeof input.messageId === "number" ? input.messageId : null;
         const node = await this.upsertNode({
+            producerAgentId: input.producerAgentId,
+            producerPromptId: input.producerPromptId,
             nodeId,
             kind: "decision",
             status: "active",
@@ -995,6 +1005,8 @@ export class MemoryNodeStore {
         ];
         const nodeId = input.nodeIdOverride ?? `failure-${input.conversationId}-${input.seq}`;
         return this.upsertNode({
+            producerAgentId: input.producerAgentId,
+            producerPromptId: input.producerPromptId,
             nodeId,
             kind: "failure",
             status: "active",
@@ -1130,6 +1142,8 @@ export class MemoryNodeStore {
                 })),
             ];
         const node = await this.upsertNode({
+            producerAgentId: input.producerAgentId,
+            producerPromptId: input.producerPromptId,
             nodeId: `fix-attempt-${input.attemptId}`,
             kind: "fix_attempt",
             status,
@@ -1165,6 +1179,8 @@ export class MemoryNodeStore {
     }
     async createTaskNode(input) {
         return this.createRequirementLikeNode({
+            producerAgentId: input.producerAgentId,
+            producerPromptId: input.producerPromptId,
             nodeId: requirementNodeId("task", input.sourceToolUseId, input.messageId),
             kind: "task",
             conversationId: input.conversationId,
@@ -1184,6 +1200,8 @@ export class MemoryNodeStore {
     }
     async createConstraintNode(input) {
         return this.createRequirementLikeNode({
+            producerAgentId: input.producerAgentId,
+            producerPromptId: input.producerPromptId,
             nodeId: requirementNodeId("constraint", input.sourceToolUseId, input.messageId),
             kind: "constraint",
             conversationId: input.conversationId,
@@ -1280,6 +1298,8 @@ export class MemoryNodeStore {
             (input.messageId != null ? String(input.messageId) : input.nodeId);
         const evidenceMessageId = typeof input.messageId === "number" ? input.messageId : null;
         const node = await this.upsertNode({
+            producerAgentId: input.producerAgentId,
+            producerPromptId: input.producerPromptId,
             nodeId: input.nodeId,
             kind: input.kind,
             status: "active",
