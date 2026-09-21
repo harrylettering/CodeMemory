@@ -747,7 +747,9 @@ function renderSummaryEvidence(evidence?: SummaryEvidence): string {
   const parts: string[] = [];
   if (evidence.children.length > 0) {
     const children = evidence.children
-      .map((child) => `${child.summaryId}: ${child.content}`)
+      // Collapsed like the node snippet: one rendered node is one line,
+      // which is what lets the scorer recognize and skip its own output.
+      .map((child) => `${child.summaryId}: ${child.content.replace(/\s+/g, " ")}`)
       .join(" | ");
     parts.push(`child summaries: ${children}`);
   } else if (typeof evidence.sourceMessageCount === "number") {
