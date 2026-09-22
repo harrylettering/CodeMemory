@@ -28,7 +28,7 @@ Do NOT invoke for:
 Run the wrapper script with `requirement` as the endpoint and a JSON payload. Required fields: `kind: "task"`, `requirement`. Optional: `details`, `acceptance_criteria` (array), `supersedesNodeId`, `sourceToolUseId`.
 
 ```bash
-~/.claude/plugins/codememory/hooks/scripts/codememory-mark.sh requirement "$(cat <<'JSON'
+CLAUDE_SESSION_ID=${CLAUDE_SESSION_ID} ${CLAUDE_PLUGIN_ROOT}/hooks/scripts/codememory-mark.sh requirement "$(cat <<'JSON'
 {
   "kind": "task",
   "requirement": "Migrate the JSONL watcher to write through the new conversation_store API",
@@ -43,7 +43,7 @@ JSON
 )"
 ```
 
-The script discovers the running daemon socket automatically. On success it returns JSON like `{"ok":true,"conversationId":...,"memoryNodeId":"requirement-task-tool-..."}`.
+Run the command exactly as written: Claude Code fills in `${CLAUDE_SESSION_ID}` and `${CLAUDE_PLUGIN_ROOT}`, and the session id is how the mark reaches this session's daemon and no other. On success it returns JSON like `{"ok":true,"conversationId":...,"memoryNodeId":"requirement-task-tool-..."}`.
 
 ## Authoring Guidance
 

@@ -29,7 +29,7 @@ Do NOT invoke for:
 Run the wrapper script with `requirement` as the endpoint and a JSON payload. Required fields: `kind: "constraint"`, `requirement`. Optional: `details`, `acceptance_criteria` (array), `supersedesNodeId`, `sourceToolUseId`.
 
 ```bash
-~/.claude/plugins/codememory/hooks/scripts/codememory-mark.sh requirement "$(cat <<'JSON'
+CLAUDE_SESSION_ID=${CLAUDE_SESSION_ID} ${CLAUDE_PLUGIN_ROOT}/hooks/scripts/codememory-mark.sh requirement "$(cat <<'JSON'
 {
   "kind": "constraint",
   "requirement": "Daemon is the only writer of memory_nodes; watcher is the only writer of conversation_messages",
@@ -43,7 +43,7 @@ JSON
 )"
 ```
 
-The script discovers the running daemon socket automatically. On success it returns JSON like `{"ok":true,"conversationId":...,"memoryNodeId":"requirement-constraint-tool-..."}`.
+Run the command exactly as written: Claude Code fills in `${CLAUDE_SESSION_ID}` and `${CLAUDE_PLUGIN_ROOT}`, and the session id is how the mark reaches this session's daemon and no other. On success it returns JSON like `{"ok":true,"conversationId":...,"memoryNodeId":"requirement-constraint-tool-..."}`.
 
 ## Authoring Guidance
 

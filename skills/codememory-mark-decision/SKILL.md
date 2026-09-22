@@ -43,7 +43,7 @@ Do not pass `supersedesNodeId` for unrelated decisions, or for refinements that 
 Run the wrapper script with `decision` as the endpoint and a JSON payload. Required fields: `decision`, `rationale`. Optional: `alternatives_rejected` (array of strings), `supersedesNodeId` (id of the older decision this replaces — see section above), `sourceToolUseId` (idempotency key — pass the model `tool_use.id` if available).
 
 ```bash
-~/.claude/plugins/codememory/hooks/scripts/codememory-mark.sh decision "$(cat <<'JSON'
+CLAUDE_SESSION_ID=${CLAUDE_SESSION_ID} ${CLAUDE_PLUGIN_ROOT}/hooks/scripts/codememory-mark.sh decision "$(cat <<'JSON'
 {
   "decision": "Store memory node tags in a separate join table rather than a JSON column",
   "rationale": "We need indexed lookup by tag for retrieval; JSON column would force a full scan.",
@@ -56,7 +56,7 @@ JSON
 )"
 ```
 
-The script discovers the running daemon socket automatically. On success it returns JSON like `{"ok":true,"conversationId":...,"memoryNodeId":"decision-tool-..."}`.
+Run the command exactly as written: Claude Code fills in `${CLAUDE_SESSION_ID}` and `${CLAUDE_PLUGIN_ROOT}`, and the session id is how the mark reaches this session's daemon and no other. On success it returns JSON like `{"ok":true,"conversationId":...,"memoryNodeId":"decision-tool-..."}`.
 
 ## Authoring Guidance
 
