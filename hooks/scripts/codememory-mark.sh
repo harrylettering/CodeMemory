@@ -12,10 +12,15 @@
 #
 # Socket discovery (in order):
 #   1. $CODEMEMORY_SOCKET if exported.
-#   2. $HOME/.claude/codememory-runtime/$CLAUDE_SESSION_ID.sock if the env var
-#      is set and the file exists.
-#   3. The most recently modified *.sock under ~/.claude/codememory-runtime/
-#      whose owning daemon process (per the matching .pid) is alive.
+#   2. The calling session's socket, by session id:
+#        $CLAUDE_SESSION_ID       -- the skills pass the id Claude Code
+#                                    substitutes for ${CLAUDE_SESSION_ID}
+#        $CLAUDE_CODE_SESSION_ID  -- present in the Bash tool's environment
+#                                    (observed, not documented)
+#   Nothing else. There used to be a third step, "the most recently modified
+#   live socket", and with several sessions open that is usually another
+#   session's daemon: the mark would be stored in, and recalled by, a session
+#   that never made it. A mark that cannot be tied to its session is refused.
 
 set -euo pipefail
 
@@ -48,37 +53,21 @@ if [ -n "${CODEMEMORY_SOCKET:-}" ] && [ -S "$CODEMEMORY_SOCKET" ]; then
   SOCKET="$CODEMEMORY_SOCKET"
 fi
 
-# 2. Session id from env.
-if [ -z "$SOCKET" ] && [ -n "${CLAUDE_SESSION_ID:-}" ]; then
-  CANDIDATE="$RUNTIME_DIR/${CLAUDE_SESSION_ID}.sock"
-  if [ -S "$CANDIDATE" ]; then
-    SOCKET="$CANDIDATE"
-  fi
-fi
-
-# 3. Pick the most recent live socket.
-if [ -z "$SOCKET" ] && [ -d "$RUNTIME_DIR" ]; then
-  while IFS= read -r sock; do
-    [ -z "$sock" ] && continue
-    [ -S "$sock" ] || continue
-    sid="$(basename "$sock" .sock)"
-    pid_file="$RUNTIME_DIR/${sid}.pid"
-    if [ -f "$pid_file" ]; then
-      pid="$(cat "$pid_file" 2>/dev/null || true)"
-      if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
-        SOCKET="$sock"
-        break
-      fi
-    else
-      SOCKET="$sock"
-      break
-    fi
-  done < <(ls -t "$RUNTIME_DIR"/*.sock 2>/dev/null || true)
-fi
-
+# 2. The calling session, by id.
+SESSION="${CLAUDE_SESSION_ID:-${CLAUDE_CODE_SESSION_ID:-}}"
 if [ -z "$SOCKET" ]; then
-  echo '{"ok":false,"reason":"no live CodeMemory daemon socket found under ~/.claude/codememory-runtime/"}' >&2
-  exit 1
+  if [ -z "$SESSION" ]; then
+    echo '{"ok":false,"reason":"no session id: cannot tell which session this mark belongs to"}' >&2
+    exit 1
+  fi
+  CANDIDATE="$RUNTIME_DIR/${SESSION}.sock"
+  if [ ! -S "$CANDIDATE" ]; then
+    # Not an invitation to use some other session's daemon. The prompt hook
+    # restarts this one on every turn, so a mark made mid-turn finds it.
+    echo "{\"ok\":false,\"reason\":\"no CodeMemory daemon for session ${SESSION}\"}" >&2
+    exit 1
+  fi
+  SOCKET="$CANDIDATE"
 fi
 
 URL="http://localhost/mark/${ENDPOINT}"
