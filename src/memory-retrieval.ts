@@ -159,9 +159,7 @@ export class MemoryRetrievalEngine {
     // shipped tasks it was meant to retire had use counts of 94 to 116.
     // A chain node counts only when the node it was stitched from does.
     const askedFor = new Set(
-      selected
-        .filter((item) => item.matchedTags.some((tag) => tag.tagType !== "kind"))
-        .map((item) => item.node.nodeId)
+      selected.filter(wasAskedFor).map((item) => item.node.nodeId)
     );
     await this.memoryStore.markUsed(
       Array.from(
@@ -636,6 +634,24 @@ function selectWithinBudget(
   return selected;
 }
 
+/**
+ * Whether the prompt matched this node on something other than its kind: a
+ * file, symbol, topic or phrase. The planner adds kind tags to nearly every
+ * prompt, so a kind match alone says the node exists, not that it was asked
+ * for. Both use-counting and rendering go by this one definition.
+ */
+function wasAskedFor(candidate: MemorySearchCandidate): boolean {
+  return candidate.matchedTags.some((tag) => tag.tagType !== "kind");
+}
+
+/**
+ * Snippet length for a node matched on its kind alone. Replaying 120 real
+ * prompts, such nodes carried 43% of injected characters, and in 54 of 112
+ * turns they were all there was. One short line says the node exists without
+ * crowding out what the prompt asked for.
+ */
+const UNASKED_SNIPPET_CHARS = 80;
+
 function renderList(
   candidates: MemorySearchCandidate[],
   maxChars: number,
@@ -645,10 +661,21 @@ function renderList(
     .map((candidate) => {
       const node = candidate.node;
       const status = node.status;
+      const prefix = `- (${node.kind}, ${status}, score ${candidate.score})`;
+      const flat = node.content.replace(/\s+/g, " ");
+      if (!wasAskedFor(candidate)) {
+        const short =
+          flat.length > UNASKED_SNIPPET_CHARS
+            ? `${flat.slice(0, UNASKED_SNIPPET_CHARS)}…`
+            : flat;
+        // The prefix stays identical: it is how the scorer recognizes
+        // CodeMemory's own output when a tool result displays it.
+        return `${prefix} ${short}`;
+      }
       const source = renderSource(node);
-      const snippet = node.content.replace(/\s+/g, " ").slice(0, maxChars);
+      const snippet = flat.slice(0, maxChars);
       const evidence = renderSummaryEvidence(summaryEvidence.get(node.nodeId));
-      return `- (${node.kind}, ${status}, score ${candidate.score}) ${snippet}${source}${evidence}`;
+      return `${prefix} ${snippet}${source}${evidence}`;
     })
     .join("\n");
 }
