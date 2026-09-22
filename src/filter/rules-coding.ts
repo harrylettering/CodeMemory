@@ -496,7 +496,14 @@ function scoreToolResults(
   // failure node could be built from it. Checking here as well is what makes a
   // swallowed exit code recoverable. The tag stays `error_inferred` — the
   // distinction from an explicit is_error is real and worth keeping.
-  if (looksLikeErrorResult(results)) {
+  //
+  // Not for tools that only read. Their result is what a file or page says,
+  // not the outcome of anything just run, so a Python module that names
+  // TypeError or code that handles ENOENT is not a failure. An explicit
+  // is_error from them -- a missing file -- was already handled above.
+  const readOnlyOrigin =
+    originToolName !== null && EXPLORATION_TOOLS.has(originToolName);
+  if (!readOnlyOrigin && looksLikeErrorResult(results)) {
     return {
       tier: "S",
       tags: ["tool_result", "error_inferred"],
