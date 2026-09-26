@@ -122,3 +122,30 @@ describe("ingesting the same line twice", () => {
     expect(second.messageId).toBe(first.messageId);
   });
 });
+
+describe("a repeat is reported as one", () => {
+  // insertMessage returns the existing row on a repeat, but said nothing about
+  // it, so every caller treated it as a fresh insert: ingestion telemetry
+  // counted the line twice, and the failure extractor built a second node from
+  // the same error (node ids are keyed by seq, so they do not collide into
+  // one). The row was deduplicated; the work done around it was not.
+  it("tells the caller the row was already there", async () => {
+    const first = await insert(1, "uuid-repeat", "npm test failed");
+    const second = await insert(1, "uuid-repeat", "npm test failed");
+
+    expect(first.alreadyStored).toBe(false);
+    expect(second.alreadyStored).toBe(true);
+    expect(second.messageId).toBe(first.messageId);
+  });
+
+  it("reports a line with no uuid as freshly stored every time", async () => {
+    // Without a uuid there is nothing to deduplicate on, so both rows are new
+    // and both must be processed.
+    const a = await insert(1, undefined, "继续");
+    const b = await insert(1, undefined, "继续");
+
+    expect(a.alreadyStored).toBe(false);
+    expect(b.alreadyStored).toBe(false);
+    expect(b.messageId).not.toBe(a.messageId);
+  });
+});

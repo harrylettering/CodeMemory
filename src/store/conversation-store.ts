@@ -29,6 +29,13 @@ export interface MessageRecord {
   content: string;
   tokenCount: number;
   createdAt: string;
+  /**
+   * True when this row was already in the table and the insert collapsed onto
+   * it. Callers do work around a message -- telemetry, failure extraction,
+   * fix-attempt tracking -- and a repeat has to skip all of it. Without this
+   * the row was deduplicated but the work around it ran twice.
+   */
+  alreadyStored: boolean;
 }
 
 export interface ConversationRecord {
@@ -166,6 +173,7 @@ export class ConversationStore {
           content: existing.content,
           tokenCount: existing.tokenCount,
           createdAt: existing.createdAt,
+          alreadyStored: true,
         };
       }
     }
@@ -218,6 +226,7 @@ export class ConversationStore {
         content: existing.content,
         tokenCount: existing.tokenCount,
         createdAt: existing.createdAt,
+        alreadyStored: true,
       };
     }
 
@@ -239,7 +248,8 @@ export class ConversationStore {
       role: params.role,
       content: params.content,
       tokenCount: params.tokenCount,
-      createdAt: now
+      createdAt: now,
+      alreadyStored: false,
     };
   }
 
