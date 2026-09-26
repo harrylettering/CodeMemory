@@ -91,6 +91,20 @@ class ValidationExhaustedError extends Error {}
  * Marker prepended to fallback "summaries" so readers see immediately that
  * the stored content is verbatim fragments, not an LLM-produced summary.
  */
+/** Fixed instruction text, outside the input cap. Exported for tests. */
+export const SUMMARY_PROMPT_PREFIX =
+  "Summarize this coding session excerpt for memory. " +
+  "Focus on: which files were modified and why, errors encountered and how they were fixed, " +
+  "key decisions made, tools invoked. Be concise and factual.\n\n";
+
+const SEPARATOR = "\n\n";
+const DIALOGUE_HEADING = "=== DIALOGUE IN THIS WINDOW (what was said) ===";
+const MESSAGES_HEADING = "=== TOOL ACTIVITY IN THIS WINDOW ===";
+
+function renderMessage(m: { role: string; content: string }): string {
+  return `[${m.role.toUpperCase()}] ${m.content}`;
+}
+
 export const TRUNCATION_FALLBACK_MARKER = "[TRUNCATION FALLBACK — LLM unavailable]";
 
 /**
@@ -181,11 +195,25 @@ const SUMMARY_METADATA_INSTRUCTION =
 export class AsyncCompactor {
   private readonly compacting = new Map<number, boolean>();
 
+  /**
+   * Completion seam. Defaults to spawning `claude --print`; the extractor and
+   * the decision judge expose the same hook. Without it a test cannot see the
+   * prompt this class assembles, which is now most of what it does.
+   */
+  private readonly runCompletion: (prompt: string, timeoutMs: number) => Promise<string>;
+
   constructor(
     private readonly db: any,
     private readonly config: CodeMemoryConfig,
-    private readonly logger: SimpleLogger
+    private readonly logger: SimpleLogger,
+    deps: {
+      runCompletion?: (prompt: string, timeoutMs: number) => Promise<string>;
+    } = {}
   ) {
+    this.runCompletion =
+      deps.runCompletion ??
+      ((prompt, timeoutMs) =>
+        spawnWithStdin("claude", buildClaudeCliArgs(this.config.compactionModel), prompt, timeoutMs));
     this.warnIfCondensationUnreachable();
   }
 
@@ -249,14 +277,17 @@ export class AsyncCompactor {
    * Empty array when the call was skipped (already running) or when there
    * was nothing to compact.
    */
-  async forceCompact(conversationId: number): Promise<string[]> {
+  async forceCompact(
+    conversationId: number,
+    options: { includeFreshTail?: boolean } = {}
+  ): Promise<string[]> {
     if (this.compacting.get(conversationId)) {
       this.logger.info(`[compactor] compaction already in progress for conv ${conversationId}, skipping`);
       return [];
     }
     this.compacting.set(conversationId, true);
     try {
-      return await this.runCompaction(conversationId);
+      return await this.runCompaction(conversationId, options);
     } catch (err) {
       this.logger.error(`[compactor] forceCompact failed for conv ${conversationId}: ${err}`);
       return [];
@@ -295,7 +326,10 @@ export class AsyncCompactor {
     }
   }
 
-  private async runCompaction(conversationId: number): Promise<string[]> {
+  private async runCompaction(
+    conversationId: number,
+    options: { includeFreshTail?: boolean } = {}
+  ): Promise<string[]> {
     const allMessages: MessageRow[] = await this.db.all(
       `SELECT messageId, seq, role, content, tokenCount, tier, createdAt
        FROM conversation_messages
@@ -308,8 +342,14 @@ export class AsyncCompactor {
 
     if (allMessages.length === 0) return [];
 
-    // Preserve the fresh tail — these messages stay uncompacted
-    const freshTail = this.config.compactionFreshTailCount;
+    // Preserve the fresh tail — these messages stay uncompacted. Except at
+    // SessionEnd: nothing is fresh once the session is over, and holding the
+    // last 20 messages back means a session's conclusions are never
+    // summarized, nor read by the extraction that rides this call. A short
+    // session would otherwise never be compacted at all.
+    const freshTail = options.includeFreshTail
+      ? 0
+      : this.config.compactionFreshTailCount;
     const compactable =
       allMessages.length > freshTail
         ? allMessages.slice(0, allMessages.length - freshTail)
@@ -322,21 +362,37 @@ export class AsyncCompactor {
       return [];
     }
 
-    // Cap batch size so the combined content never exceeds compactionMaxInputChars.
-    // Each token ≈ 4 chars; divide by 4 to get a safe token budget per batch.
-    const maxBatchTokens = Math.min(
-      this.config.leafChunkTokens ?? 20000,
-      Math.floor(this.config.compactionMaxInputChars / 4)
+    // Counted as rendered, not estimated. `tokenCount * 4` understated the
+    // real text -- measured ratio 4.11, plus the `[ROLE] ` prefixes -- so 82
+    // of 136 leaf batches overflowed the cap and lost their tails inside
+    // summarize().
+    const batches = this.batchByChars(
+      compactable,
+      this.config.compactionBatchChars,
+      this.config.leafChunkTokens ?? 20000
     );
-    const batches = this.batchByTokens(compactable, maxBatchTokens);
 
     this.logger.info(
       `[compactor] compacting ${compactable.length} messages into ${batches.length} summary batch(es)`
     );
 
+    // Dialogue is attributed to a batch by a contiguous seq range, not by the
+    // batch's own first message. A window's prose usually opens it -- the user
+    // says what to do, then the tools run -- so a range starting at the first
+    // M/L message would drop exactly the message that states the task.
+    const covered: { maxSeq: number | null } | undefined = await this.db.get(
+      `SELECT MAX(m.seq) AS maxSeq
+         FROM summary_messages sm
+         JOIN conversation_messages m ON m.messageId = sm.messageId
+        WHERE m.conversationId = ?`,
+      conversationId
+    );
+    let dialogueFrom = (covered?.maxSeq ?? -1) + 1;
+
     const createdIds: string[] = [];
     for (const batch of batches) {
-      const id = await this.compactBatch(conversationId, batch);
+      const id = await this.compactBatch(conversationId, batch, dialogueFrom);
+      dialogueFrom = batch[batch.length - 1].seq + 1;
       createdIds.push(id);
     }
 
@@ -532,35 +588,99 @@ export class AsyncCompactor {
     return summaryId;
   }
 
-  private batchByTokens(messages: MessageRow[], maxTokens: number): MessageRow[][] {
+  /**
+   * Closes a batch on whichever bound is reached first: the characters this
+   * class will actually send, or `leafChunkTokens`. The token bound is what
+   * the condensation fanout math is expressed in, so it stays; the character
+   * bound is the one that was missing, and the one that decides whether
+   * summarize() has to cut the tail off.
+   */
+  private batchByChars(
+    messages: MessageRow[],
+    maxChars: number,
+    maxTokens: number
+  ): MessageRow[][] {
     const batches: MessageRow[][] = [];
     let current: MessageRow[] = [];
+    let currentChars = 0;
     let currentTokens = 0;
 
     for (const msg of messages) {
-      if (currentTokens + msg.tokenCount > maxTokens && current.length > 0) {
+      const cost = renderMessage(msg).length + SEPARATOR.length;
+      const overChars = currentChars + cost > maxChars;
+      const overTokens = currentTokens + msg.tokenCount > maxTokens;
+      if ((overChars || overTokens) && current.length > 0) {
         batches.push(current);
         current = [];
+        currentChars = 0;
         currentTokens = 0;
       }
       current.push(msg);
+      currentChars += cost;
       currentTokens += msg.tokenCount;
     }
     if (current.length > 0) batches.push(current);
     return batches;
   }
 
-  private async compactBatch(conversationId: number, messages: MessageRow[]): Promise<string> {
-    const combined = messages
-      .map((m) => `[${m.role.toUpperCase()}] ${m.content}`)
-      .join("\n\n");
+  /**
+   * The window's own dialogue: S-tier prose in the same seq range.
+   *
+   * Compaction reads M/L -- tool metadata -- while decisions, tasks and
+   * constraints are stated in prose. S-tier tool results are left out: they
+   * are error output, already covered by failure nodes, and 29% of S-tier
+   * characters.
+   *
+   * Oldest are dropped first when over budget: a window's conclusions sit at
+   * its end.
+   */
+  private async dialogueForRange(
+    conversationId: number,
+    loSeq: number,
+    hiSeq: number
+  ): Promise<string> {
+    const rows: MessageRow[] = await this.db.all(
+      `SELECT messageId, seq, role, content, tokenCount, tier, createdAt
+         FROM conversation_messages
+        WHERE conversationId = ?
+          AND seq BETWEEN ? AND ?
+          AND tier = 'S'
+          AND (tags IS NULL OR tags NOT LIKE '%"tool_result"%')
+        ORDER BY seq ASC`,
+      [conversationId, loSeq, hiSeq]
+    );
+    if (rows.length === 0) return "";
+
+    const budget = this.config.compactionDialogueChars;
+    const kept: string[] = [];
+    let used = 0;
+    for (let i = rows.length - 1; i >= 0; i--) {
+      const rendered = renderMessage(rows[i]);
+      if (used + rendered.length > budget) break;
+      kept.unshift(rendered);
+      used += rendered.length + SEPARATOR.length;
+    }
+    return kept.join(SEPARATOR);
+  }
+
+  private async compactBatch(
+    conversationId: number,
+    messages: MessageRow[],
+    dialogueFromSeq = messages[0].seq
+  ): Promise<string> {
+    const combined = messages.map(renderMessage).join(SEPARATOR);
+    const dialogue = await this.dialogueForRange(
+      conversationId,
+      Math.min(dialogueFromSeq, messages[0].seq),
+      messages[messages.length - 1].seq
+    );
 
     const {
       text: summaryText,
       metadata: summaryMetadata,
       telemetry,
       inputChars,
-    } = await this.summarize(combined);
+    } = await this.summarize(combined, dialogue);
     const summaryId = `leaf-${conversationId}-${Date.now()}-${Math.random()
       .toString(36)
       .slice(2, 8)}`;
@@ -614,28 +734,37 @@ export class AsyncCompactor {
     return summaryId;
   }
 
-  private async summarize(content: string): Promise<{
+  private async summarize(
+    content: string,
+    dialogue = ""
+  ): Promise<{
     text: string;
     metadata: SummaryMetadata | null;
     telemetry: SummaryGenerationTelemetry;
     inputChars: number;
   }> {
-    const maxInputChars = this.config.compactionMaxInputChars;
-
-    // Hard cap: truncate content before building the prompt so the total
-    // input to `claude --print` never exceeds the configured limit.
-    const safeContent =
-      content.length <= maxInputChars
-        ? content
-        : content.slice(0, maxInputChars) + "\n…[truncated for compaction]";
-
-    const prompt =
-      "Summarize this coding session excerpt for memory. " +
-      "Focus on: which files were modified and why, errors encountered and how they were fixed, " +
-      "key decisions made, tools invoked. Be concise and factual.\n\n" +
+    const header =
+      SUMMARY_PROMPT_PREFIX +
       SUMMARY_METADATA_INSTRUCTION +
-      "\n\n" +
-      safeContent;
+      "\n\n";
+    const dialogueBlock = dialogue
+      ? `${DIALOGUE_HEADING}\n${dialogue}\n\n${MESSAGES_HEADING}\n`
+      : "";
+
+    // The cap bounds the transcript this call carries -- dialogue plus tool
+    // activity -- not the fixed instructions, which is what it meant before
+    // the dialogue existed. Counting the instructions against it would starve
+    // the content whenever the cap is small.
+    //
+    // Tool activity gives way first: the dialogue is the smaller part and the
+    // only place decisions, tasks and constraints are stated.
+    const room = this.config.compactionMaxInputChars - dialogueBlock.length;
+    const safeContent =
+      content.length <= room
+        ? content
+        : content.slice(0, Math.max(0, room)) + "\n…[truncated for compaction]";
+
+    const prompt = header + dialogueBlock + safeContent;
 
     const result = await this.callLlmOrTruncate(prompt, safeContent, {
       kind: "leaf",
@@ -645,7 +774,7 @@ export class AsyncCompactor {
       text: result.content,
       metadata: result.metadata,
       telemetry: result.telemetry,
-      inputChars: safeContent.length,
+      inputChars: safeContent.length + dialogueBlock.length,
     };
   }
 
@@ -753,8 +882,7 @@ export class AsyncCompactor {
     const model = this.config.compactionModel;
     if (!this.config.compactionDisableLlm) {
       try {
-        const args = buildClaudeCliArgs(model);
-        const raw = await spawnWithStdin("claude", args, prompt, 30_000);
+        const raw = await this.runCompletion(prompt, this.config.compactionTimeoutMs);
         const firstParsed = parseSummaryWithMetadata(raw);
         const firstCheck = this.validateSummaryQuality(
           firstParsed.content,
@@ -784,7 +912,7 @@ export class AsyncCompactor {
           firstCheck,
           options
         );
-        const retryRaw = await spawnWithStdin("claude", args, retryPrompt, 30_000);
+        const retryRaw = await this.runCompletion(retryPrompt, this.config.compactionTimeoutMs);
         const retryParsed = parseSummaryWithMetadata(retryRaw);
         const retryCheck = this.validateSummaryQuality(
           retryParsed.content,
