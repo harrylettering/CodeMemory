@@ -24,7 +24,9 @@ echo "[$(date -Iseconds)] SessionEnd final-compact (sid=${SESSION_ID})" >> "$LOG
 
 SOCKET_PATH="${HOME}/.claude/codememory-runtime/${SESSION_ID}.sock"
 if [ -S "$SOCKET_PATH" ] && command -v curl >/dev/null 2>&1; then
-  PAYLOAD=$(jq -nc --arg sid "$SESSION_ID" '{sessionId: $sid}')
+  # `final` tells the daemon the session is over, so the compaction covers the
+  # fresh tail as well. Those last messages hold the session's conclusions.
+  PAYLOAD=$(jq -nc --arg sid "$SESSION_ID" '{sessionId: $sid, final: true}')
   if curl -fsS \
        --unix-socket "$SOCKET_PATH" \
        --max-time 1 \
