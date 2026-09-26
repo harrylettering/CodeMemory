@@ -74,6 +74,8 @@ export interface CodeMemoryConfig {
   compactionBatchChars: number;
   /** Characters of the window's own dialogue added to the call. */
   compactionDialogueChars: number;
+  /** Characters of candidate memory titles added to the call. */
+  compactionCandidateChars: number;
   /** How long a compaction call may take. */
   compactionTimeoutMs: number;
   /** If true, skip the LLM call and use the truncation fallback. Useful in
@@ -107,13 +109,6 @@ export interface CodeMemoryConfig {
    * as the current goal forever.
    */
   activeTaskStaleDays: number;
-  autoSupersedeViaLlm: boolean;
-  /** Model for the auto-supersede judge. Unset = host default. */
-  autoSupersedeModel?: string;
-  /** Max active decisions in the conversation considered by the judge per call (default 20). */
-  autoSupersedeMaxCandidates: number;
-  /** Timeout for the judge LLM call in milliseconds (default 8000). */
-  autoSupersedeTimeoutMs: number;
 }
 
 const DEFAULT_DB_PATH = join(homedir(), ".claude", "codememory.db");
@@ -150,6 +145,9 @@ export function resolveCodeMemoryConfig(env: NodeJS.ProcessEnv = process.env): C
     compactionMaxInputChars: parseInt(env.CODEMEMORY_COMPACTION_MAX_INPUT_CHARS || "34000"),
     compactionBatchChars: parseInt(env.CODEMEMORY_COMPACTION_BATCH_CHARS || "24000"),
     compactionDialogueChars: parseInt(env.CODEMEMORY_COMPACTION_DIALOGUE_CHARS || "8000"),
+    // Titles only: ~15 candidates. Sending 200 characters of content each cost
+    // about 1,000 tokens on every compaction, re-sent every time.
+    compactionCandidateChars: parseInt(env.CODEMEMORY_COMPACTION_CANDIDATE_CHARS || "2000"),
     // 30s was hardcoded; a larger input needs longer, and compaction is
     // background work that blocks nobody.
     compactionTimeoutMs: parseInt(env.CODEMEMORY_COMPACTION_TIMEOUT_MS || "60000"),
@@ -163,14 +161,6 @@ export function resolveCodeMemoryConfig(env: NodeJS.ProcessEnv = process.env): C
     ),
     activeTaskStaleDays: parseInt(
       env.CODEMEMORY_ACTIVE_TASK_STALE_DAYS || "14"
-    ),
-    autoSupersedeViaLlm: env.CODEMEMORY_AUTO_SUPERSEDE_VIA_LLM === "true",
-    autoSupersedeModel: env.CODEMEMORY_AUTO_SUPERSEDE_MODEL || undefined,
-    autoSupersedeMaxCandidates: parseInt(
-      env.CODEMEMORY_AUTO_SUPERSEDE_MAX_CANDIDATES || "20"
-    ),
-    autoSupersedeTimeoutMs: parseInt(
-      env.CODEMEMORY_AUTO_SUPERSEDE_TIMEOUT_MS || "8000"
     ),
   };
 }

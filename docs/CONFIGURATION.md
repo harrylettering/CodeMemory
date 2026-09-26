@@ -4,7 +4,7 @@
 
 All configuration is read from environment variables prefixed with `CODEMEMORY_`. Defaults are resolved in [`src/db/config.ts`](../src/db/config.ts) by `resolveCodeMemoryConfig`. The README's Configuration section lists only the highest-traffic knobs; this document is the full surface.
 
-Each model env var is independent, and `CODEMEMORY_EXPANSION_MODEL`, `CODEMEMORY_QUERY_PLANNER_MODEL`, `CODEMEMORY_COMPACTION_MODEL` and `CODEMEMORY_AUTO_SUPERSEDE_MODEL` are all unset by default. Unset means no `--model` argument is passed and the host's own model is used. An empty string counts as unset, not as a model named `""`.
+Each model env var is independent, and `CODEMEMORY_EXPANSION_MODEL`, `CODEMEMORY_QUERY_PLANNER_MODEL` and `CODEMEMORY_COMPACTION_MODEL` are all unset by default. Unset means no `--model` argument is passed and the host's own model is used. An empty string counts as unset, not as a model named `""`.
 
 > Anything previously documented but not listed here was removed in cleanup as dead-letter (declared in config but never consumed). If you have one of those set in your shell, it is now a no-op and can be removed.
 
@@ -69,16 +69,14 @@ When enabled, a single haiku call detects whether a newly marked decision implic
 
 | Variable | Default | Effect |
 |---|---|---|
-| `CODEMEMORY_AUTO_SUPERSEDE_VIA_LLM` | `false` | Master switch for the LLM-as-judge auto-supersede path. |
-| `CODEMEMORY_AUTO_SUPERSEDE_MODEL` | _(unset)_ | Judge model. |
-| `CODEMEMORY_AUTO_SUPERSEDE_MAX_CANDIDATES` | `20` | Max active decisions the judge considers per call. |
 | `CODEMEMORY_DAEMON_IDLE_TIMEOUT_MS` | `1800000` (30 min) | Inactivity after which a daemon exits on its own. A hook talking to the socket or a line appearing in a transcript counts as activity. `0` disables it. SessionEnd is not a reliable teardown signal, so without this a daemon outlives its session until reboot. |
 | `CODEMEMORY_RESPAWN_TIMEOUT` | `1.5` | Seconds UserPromptSubmit waits for a respawned daemon. Deliberately shorter than the SessionStart budget: this runs between the user pressing enter and the model starting, and a daemon that cannot come up quickly is retried next prompt, losing nothing because read positions are durable. |
 | `CODEMEMORY_ACTIVE_TASK_STALE_DAYS` | `14` | Days after which an untouched active task is marked stale. Tasks have no terminal state of their own, so without this a finished task is recalled as the current goal forever. A task retrieval keeps using is exempt. |
-| `CODEMEMORY_AUTO_SUPERSEDE_TIMEOUT_MS` | `8000` | Hard timeout for the judge call. |
 
 ## Removed in cleanup (no longer recognized)
 
 The following variables were declared historically but had no consumer in the runtime. They were removed to avoid the misleading impression of being tunable. If your environment still sets any of these, it is safe to remove:
 
 `CODEMEMORY_CONTEXT_THRESHOLD`, `CODEMEMORY_FRESH_TAIL_COUNT` (the compactor uses `CODEMEMORY_COMPACTION_FRESH_TAIL_COUNT` instead), `CODEMEMORY_LEAF_MIN_FANOUT`, `CODEMEMORY_CONDENSED_MIN_FANOUT_HARD`, `CODEMEMORY_MAX_ROUNDS`, `CODEMEMORY_TIMEZONE`, `CODEMEMORY_PRUNE_HEARTBEAT_OK`, `CODEMEMORY_CIRCUIT_BREAKER_COOLDOWN_MS`, `CODEMEMORY_CIRCUIT_BREAKER_THRESHOLD`, `CODEMEMORY_MAX_EXPAND_QUERY_TOKENS`, `CODEMEMORY_SUMMARY_MODEL`, `CODEMEMORY_SUMMARY_PROVIDER`, `CODEMEMORY_FILES_PATH`, `CODEMEMORY_IGNORE_SESSION_PATTERNS`, `CODEMEMORY_STATELESS_SESSION_PATTERNS`, `CODEMEMORY_SKIP_STATELESS_SESSIONS`.
+
+> **Retired:** the `CODEMEMORY_AUTO_SUPERSEDE_*` variables are gone. The LLM-as-judge that superseded decisions at write time never succeeded on a live machine (29 calls, 29 session-limit failures) and its job is now done by the extraction that rides compaction, which sees the whole window rather than one node. Leaving the variables set does nothing.

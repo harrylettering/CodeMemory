@@ -8,16 +8,11 @@ import {
   type WantedMemoryKind,
 } from "../retrieval-plan.js";
 import type { SummaryRecord } from "./summary-store.js";
-import type { DecisionSupersedeJudge } from "./decision-supersede-judge.js";
 import { isAnchorableSignature } from "../negexp/signature.js";
 
 export interface MemoryNodeStoreOptions {
   /** Enables LLM-as-judge auto-supersede for same-conversation decisions. */
-  autoSupersedeViaLlm?: boolean;
   /** Max active decisions in the conversation considered by the judge per call. */
-  autoSupersedeMaxCandidates?: number;
-  /** Judge implementation. Required when `autoSupersedeViaLlm` is true. */
-  decisionJudge?: DecisionSupersedeJudge;
 }
 
 const MAX_MEMORY_NODE_CONTENT_CHARS = 6000;
@@ -1321,6 +1316,8 @@ export class MemoryNodeStore {
   async recordRetrieval(input: {
     conversationId?: number | null;
     sessionId?: string | null;
+    /** The turn this retrieval served, so a compaction window can match it exactly. */
+    promptId?: string | null;
     promptLength: number;
     plannerSource: "fast" | "smart" | "fallback";
     plannerAttempted: boolean;
@@ -1357,8 +1354,8 @@ export class MemoryNodeStore {
            candidateCount, selectedNodeCount, stitchedRelationCount,
            stitchedChainCount, summaryEvidenceCount, firstHopNodeCount,
            secondHopNodeCount, estimatedTokens, queryCount, failureLookupCount,
-           failureHits, decisionHits, messageHits, surfacedNodeIds, createdAt
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           failureHits, decisionHits, messageHits, surfacedNodeIds, promptId, createdAt
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           input.conversationId ?? null,
           input.sessionId ?? null,
@@ -1388,6 +1385,7 @@ export class MemoryNodeStore {
           input.surfacedNodeIds?.length
             ? JSON.stringify(input.surfacedNodeIds)
             : null,
+          input.promptId ?? null,
           new Date().toISOString(),
         ]
       );
@@ -1475,6 +1473,8 @@ export class MemoryNodeStore {
     alternativesRejected?: string[];
     content: string;
     supersedesNodeId?: string;
+    /** Extra provenance, as the task and constraint creators already accept. */
+    metadata?: Record<string, unknown>;
   }): Promise<MemoryNodeRecord> {
     const pivots = extractPromptPivots(input.content);
     const topics = inferTopics(input.content, pivots);
@@ -1506,6 +1506,7 @@ export class MemoryNodeStore {
       sourceToolUseId: input.sourceToolUseId ?? null,
       content: input.content,
       metadata: {
+        ...(input.metadata ?? {}),
         messageId: input.messageId ?? null,
         sourceToolUseId: input.sourceToolUseId ?? null,
         decision: input.decision,
@@ -1522,142 +1523,12 @@ export class MemoryNodeStore {
         reason: "explicit decision supersede",
         evidenceMessageId,
       });
-    } else if (this.options.autoSupersedeViaLlm && this.options.decisionJudge) {
-      await this.runDecisionJudgeBackstop({
-        newNode: node,
-        evidenceMessageId,
-      });
     }
 
     return (await this.getNode(node.nodeId)) ?? node;
   }
 
-  private async runDecisionJudgeBackstop(input: {
-    newNode: MemoryNodeRecord;
-    evidenceMessageId: number | null;
-  }): Promise<void> {
-    const judge = this.options.decisionJudge;
-    if (!judge) return;
-    if (input.newNode.conversationId == null) return;
-    const limit = clampJudgeCandidateLimit(
-      this.options.autoSupersedeMaxCandidates
-    );
-    const candidates = (
-      await this.listDecisionNodes({
-        conversationId: input.newNode.conversationId,
-        limit,
-      })
-    ).filter((c) => c.nodeId !== input.newNode.nodeId);
-    if (candidates.length === 0) {
-      await this.recordDecisionJudge({
-        newNode: input.newNode,
-        candidateCount: 0,
-        supersededNodeIds: [],
-        outcome: "no_candidates",
-      });
-      return;
-    }
 
-    const startedAt = Date.now();
-    let outcomes;
-    try {
-      outcomes = await judge.judge({
-        newDecision: {
-          nodeId: input.newNode.nodeId,
-          content: input.newNode.content,
-        },
-        candidates: candidates.map((c) => ({
-          nodeId: c.nodeId,
-          content: c.content,
-        })),
-      });
-    } catch (err) {
-      // Still swallowed: a judge failure must not fail the write that
-      // triggered it. But it is no longer invisible — an authentication
-      // failure or a timeout on every call used to look exactly like a judge
-      // that ran and agreed with everything.
-      await this.recordDecisionJudge({
-        newNode: input.newNode,
-        candidateCount: candidates.length,
-        supersededNodeIds: [],
-        outcome: "error",
-        errorMessage: err instanceof Error ? err.message : String(err),
-        latencyMs: Date.now() - startedAt,
-      });
-      return;
-    }
-    const latencyMs = Date.now() - startedAt;
-
-    const supersededNodeIds: string[] = [];
-    for (const outcome of outcomes) {
-      if (outcome.verdict !== "SUPERSEDED_BY_NEW") continue;
-      await this.supersedeDecision({
-        oldNodeId: outcome.nodeId,
-        newNodeId: input.newNode.nodeId,
-        reason: outcome.reason
-          ? `auto-supersede via LLM judge: ${outcome.reason}`
-          : "auto-supersede via LLM judge",
-        evidenceMessageId: input.evidenceMessageId,
-      });
-      supersededNodeIds.push(outcome.nodeId);
-    }
-
-    // An empty verdict list means the model answered but nothing parsed, which
-    // is a prompt or model problem. A full list of KEEPs means it worked and
-    // was conservative. Same zero supersedes, different diagnosis.
-    await this.recordDecisionJudge({
-      newNode: input.newNode,
-      candidateCount: candidates.length,
-      supersededNodeIds,
-      outcome:
-        supersededNodeIds.length > 0
-          ? "superseded"
-          : outcomes.length === 0
-            ? "empty_verdict"
-            : "all_kept",
-      latencyMs,
-    });
-  }
-
-  private async recordDecisionJudge(input: {
-    newNode: MemoryNodeRecord;
-    candidateCount: number;
-    supersededNodeIds: string[];
-    outcome:
-      | "superseded"
-      | "all_kept"
-      | "no_candidates"
-      | "empty_verdict"
-      | "error";
-    errorMessage?: string;
-    latencyMs?: number;
-  }): Promise<void> {
-    try {
-      await this.db.run(
-        `INSERT INTO decision_judge_events (
-           conversationId, sessionId, newNodeId, candidateCount,
-           supersededCount, outcome, supersededNodeIds, errorMessage,
-           latencyMs, createdAt
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [
-          input.newNode.conversationId ?? null,
-          input.newNode.sessionId ?? null,
-          input.newNode.nodeId,
-          input.candidateCount,
-          input.supersededNodeIds.length,
-          input.outcome,
-          input.supersededNodeIds.length
-            ? JSON.stringify(input.supersededNodeIds)
-            : null,
-          input.errorMessage ?? null,
-          input.latencyMs ?? null,
-          new Date().toISOString(),
-        ]
-      );
-    } catch {
-      // Telemetry is never worth failing a write over.
-    }
-  }
 
   async createFailureNode(input: CreateFailureNodeInput): Promise<MemoryNodeRecord> {
     const content = renderFailureContent(input);

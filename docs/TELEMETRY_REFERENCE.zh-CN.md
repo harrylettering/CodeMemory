@@ -89,7 +89,7 @@
 
 ## `decision_judge_events`
 
-每次自动 supersede 判官调用一行。仅在 `CODEMEMORY_AUTO_SUPERSEDE_VIA_LLM=true` 时产生。
+**历史数据。** 每次自动 supersede 判官调用一行。判官已在压缩时抽取接管 supersede 之后下线，不再产生新行。它留下的 29 行全部是额度失败，这正是下线它的依据。
 
 | 列 | 说明 |
 |---|---|
@@ -151,3 +151,20 @@
 ## 怎么读
 
 `scripts/analyze-failure-recall.mjs` 会打印六张表，对应第 ⑤ 到 ⑪ 节，和不依赖埋点的锚点覆盖率、签名质量分析放在一起。在有实际流量的库上跑；没有数据时各节会退化成一行"尚未产生数据"，而不是把空表误报成结论。
+
+### `compaction_events` 上的抽取列
+
+抽取搭在压缩调用上，所以它的成本和产出记在同一行。这个配对本身就是要回答的问题：搭便车是为了不新增调用，而只有成本和产出放在一起，才能说明多出来的输入值不值。
+
+| 列 | 含义 |
+|---|---|
+| `promptChars` | 整个提示的长度，也就是这次调用真正付费的部分。`inputChars` 只统计转录那一段。 |
+| `dialogueChars` | 窗口自己的对话文字。为 0 表示这是纯工具调用窗口，抽取整个跳过。 |
+| `candidateCount` | 发给模型的候选记忆条数。 |
+| `candidateFromSurfaced` / `candidateFromRecent` / `candidateFromScan` | 来源：窗口内提示时召回过的（A）、上次压缩之后新写入的（B）、锚点扫描（C）。A 覆盖近期 85% 的窗口；这个比例下降，说明是扫描在扛着，而扫描的权重是拍出来的。 |
+| `candidateDropped` | 被字符预算挤掉的候选数。长期大于零，才说明按相关度挑选值得它的成本。 |
+| `extractionAdded` / `extractionUpdated` / `extractionInvalidated` | 实际写入了什么。 |
+| `extractionRejected` | 被拒绝的操作：目标 id 不在候选里、缺目标、空陈述、本轮不产出的 kind、对同一节点的矛盾操作。模型反复点名没给过的 id，是提示词的问题，而这里是唯一能看出来的地方。 |
+| `extractionRetries` | 降级之后的补做次数，上限 2。降级意味着根本没到模型，那个窗口还欠一次抽取；补做只补抽取，不重做摘要。 |
+
+`retrieval_events.promptId` 记录这次召回服务的是哪一轮，压缩窗口因此能精确对上它覆盖的轮次，而不是靠时间范围去套。

@@ -81,7 +81,11 @@ elif [ ! -S "$SOCKET_PATH" ]; then
   exit 0
 fi
 
-PAYLOAD=$(jq -nc --arg prompt "$PROMPT" '{prompt: $prompt}')
+# prompt_id ties this retrieval to the turn it served. A compaction window is
+# matched to its turns by timestamp otherwise, which is approximate at the edges.
+PROMPT_ID=$(printf '%s' "$INPUT" | jq -r '.prompt_id // ""')
+PAYLOAD=$(jq -nc --arg prompt "$PROMPT" --arg promptId "$PROMPT_ID" \
+  '{prompt: $prompt, promptId: (if $promptId == "" then null else $promptId end)}')
 
 if ! RESPONSE=$(curl -fsS \
       --unix-socket "$SOCKET_PATH" \

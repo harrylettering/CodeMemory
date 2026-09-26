@@ -19,6 +19,10 @@
  */
 
 import { spawn } from "node:child_process";
+import { collectCandidateMemories, type CandidateMemory } from "./memory-candidates.js";
+import { parseExtractedMemories } from "./extracted-memories.js";
+import { applyExtractedMemories } from "./extraction-apply.js";
+import { extractPromptPivots, inferTopics, qualifyFileTag } from "../retrieval-plan.js";
 import {
   buildClaudeCliArgs,
   claudeCliSpawnEnv,
@@ -92,6 +96,15 @@ class ValidationExhaustedError extends Error {}
  * the stored content is verbatim fragments, not an LLM-produced summary.
  */
 /** Fixed instruction text, outside the input cap. Exported for tests. */
+const EXTRACTION_INSTRUCTION =
+  'Also report what this window decided, started or constrained, in a "memories" array on that same JSON line. ' +
+  'Each entry: {"kind": "decision"|"task"|"constraint", "op": "ADD"|"UPDATE"|"INVALIDATE"|"NOOP", "text": "<one sentence>", "targetNodeId": "<id from KNOWN MEMORIES>", "reason": "<≤80 chars>"}. ' +
+  "Take decisions, tasks and constraints from what was SAID in the dialogue; use the tool activity only as evidence that a task finished. Never invent a task from a tool call alone. " +
+  "UPDATE or INVALIDATE only a targetNodeId listed under KNOWN MEMORIES; to revise something stated earlier in this same window, use ADD with a \"revises\" field quoting that earlier statement. " +
+  'Report nothing rather than guessing: an empty array, or {"op":"NOOP"}, is the right answer for a window that decided nothing.';
+
+const CANDIDATES_HEADING = "=== KNOWN MEMORIES IN THIS SESSION (id · kind/status · date · claim) ===";
+
 export const SUMMARY_PROMPT_PREFIX =
   "Summarize this coding session excerpt for memory. " +
   "Focus on: which files were modified and why, errors encountered and how they were fixed, " +
@@ -132,6 +145,12 @@ interface SummaryMetadata {
   anchor: boolean;
   kinds: string[];
   reason?: string;
+  /**
+   * The header object as it arrived. Extraction reads `memories` off it, and
+   * only the caller knows which candidate ids were offered, so validation
+   * cannot happen here.
+   */
+  raw?: Record<string, unknown>;
 }
 
 /**
@@ -179,6 +198,7 @@ function tryParseMetadata(text: string): SummaryMetadata | null {
       kinds,
       reason:
         typeof obj.reason === "string" ? obj.reason.slice(0, 200) : undefined,
+      raw: obj,
     };
   } catch {
     return null;
@@ -394,6 +414,16 @@ export class AsyncCompactor {
       const id = await this.compactBatch(conversationId, batch, dialogueFrom);
       dialogueFrom = batch[batch.length - 1].seq + 1;
       createdIds.push(id);
+    }
+
+    // One window per run, after this run's own batches: a fallback is usually
+    // a session limit, and retrying inside the same minute would hit it again.
+    // Never at the expense of the compaction itself -- telemetry is where the
+    // pending window is recorded, and a missing table must not abort the run.
+    try {
+      await this.retryPendingExtraction(conversationId);
+    } catch (err) {
+      this.logger.debug(`[compactor] extraction retry skipped: ${err}`);
     }
 
     // After leaves are written, try a single condensation pass. Bounded by
@@ -624,6 +654,23 @@ export class AsyncCompactor {
   }
 
   /**
+   * Anchors for the fallback candidate scan: what this window touched.
+   *
+   * Files and commands come from the tool metadata, symbols and topics from
+   * what was said. Node tags are sparse on files (21) and topics (25) and
+   * dense on symbols (415), so symbols carry most of this.
+   */
+  private anchorsFromWindow(toolActivity: string, dialogue: string) {
+    const pivots = extractPromptPivots(`${dialogue}\n${toolActivity}`);
+    return {
+      files: pivots.filePaths.map(qualifyFileTag),
+      commands: pivots.commands,
+      symbols: pivots.symbols,
+      topics: inferTopics(dialogue, pivots),
+    };
+  }
+
+  /**
    * The window's own dialogue: S-tier prose in the same seq range.
    *
    * Compaction reads M/L -- tool metadata -- while decisions, tasks and
@@ -675,12 +722,39 @@ export class AsyncCompactor {
       messages[messages.length - 1].seq
     );
 
+    // Extraction only runs where there is something to extract from: 16% of
+    // real windows are pure tool calls, and those must not pay for the
+    // instruction, the candidate list or the dialogue section.
+    let candidates: CandidateMemory[] = [];
+    let candidatesRendered = "";
+    let candidatesDropped = 0;
+    let candidateSources = { fromSurfaced: 0, fromRecentWrites: 0, fromTagScan: 0 };
+    if (dialogue) {
+      try {
+        const collected = await collectCandidateMemories(this.db, {
+          conversationId,
+          windowFrom: messages[0].createdAt,
+          windowTo: messages[messages.length - 1].createdAt,
+          writtenSince: await this.lastCompactionAt(conversationId),
+          anchors: this.anchorsFromWindow(combined, dialogue),
+          budgetChars: this.config.compactionCandidateChars,
+        });
+        candidates = collected.items;
+        candidatesRendered = collected.rendered;
+        candidatesDropped = collected.counts.dropped;
+        candidateSources = collected.counts;
+      } catch (err) {
+        this.logger.warn(`[compactor] candidate collection failed: ${err}`);
+      }
+    }
+
     const {
       text: summaryText,
       metadata: summaryMetadata,
       telemetry,
       inputChars,
-    } = await this.summarize(combined, dialogue);
+      promptChars,
+    } = await this.summarize(combined, dialogue, candidatesRendered);
     const summaryId = `leaf-${conversationId}-${Date.now()}-${Math.random()
       .toString(36)
       .slice(2, 8)}`;
@@ -718,6 +792,14 @@ export class AsyncCompactor {
       summaryMetadata
     );
 
+    const extraction = await this.applyExtraction({
+      conversationId,
+      summaryId,
+      metadata: summaryMetadata,
+      candidates,
+      enabled: Boolean(dialogue),
+    });
+
     await this.recordCompactionEvent({
       conversationId,
       kind: "leaf",
@@ -726,6 +808,16 @@ export class AsyncCompactor {
       inputChars,
       outputTokens: tokenCount,
       telemetry,
+      promptChars,
+      extraction: {
+        ...extraction,
+        candidateCount: candidates.length,
+        candidateDropped: candidatesDropped,
+        candidateFromSurfaced: candidateSources.fromSurfaced,
+        candidateFromRecent: candidateSources.fromRecentWrites,
+        candidateFromScan: candidateSources.fromTagScan,
+        dialogueChars: dialogue.length,
+      },
     });
 
     this.logger.debug(
@@ -736,19 +828,26 @@ export class AsyncCompactor {
 
   private async summarize(
     content: string,
-    dialogue = ""
+    dialogue = "",
+    candidates = ""
   ): Promise<{
     text: string;
     metadata: SummaryMetadata | null;
     telemetry: SummaryGenerationTelemetry;
     inputChars: number;
+    /** The whole prompt, which is what the call is actually billed for. */
+    promptChars: number;
   }> {
+    // The extraction instruction only appears when there is dialogue to
+    // extract from; a pure tool-call window keeps the prompt it always had.
     const header =
       SUMMARY_PROMPT_PREFIX +
       SUMMARY_METADATA_INSTRUCTION +
+      (dialogue ? `\n\n${EXTRACTION_INSTRUCTION}` : "") +
       "\n\n";
+    const candidateBlock = candidates ? `${CANDIDATES_HEADING}\n${candidates}\n\n` : "";
     const dialogueBlock = dialogue
-      ? `${DIALOGUE_HEADING}\n${dialogue}\n\n${MESSAGES_HEADING}\n`
+      ? `${candidateBlock}${DIALOGUE_HEADING}\n${dialogue}\n\n${MESSAGES_HEADING}\n`
       : "";
 
     // The cap bounds the transcript this call carries -- dialogue plus tool
@@ -775,6 +874,7 @@ export class AsyncCompactor {
       metadata: result.metadata,
       telemetry: result.telemetry,
       inputChars: safeContent.length + dialogueBlock.length,
+      promptChars: prompt.length,
     };
   }
 
@@ -831,6 +931,204 @@ export class AsyncCompactor {
    * long it took, or why it fell back — and the fallback marker in the text
    * only survives while the text does.
    */
+  /** A window may be retried twice; after that its decisions are written off. */
+  private static readonly MAX_EXTRACTION_RETRIES = 2;
+
+  /**
+   * Re-run extraction for one window whose call fell back.
+   *
+   * A fallback writes a truncation summary and marks the messages covered, so
+   * nothing revisits them: the summary survives, the extraction does not.
+   * Steady-state fallback is about 5%, but it arrives in bursts -- a re-import
+   * once drove 36 session-limit failures in a day -- and without this a burst
+   * costs a day of decisions.
+   *
+   * Re-summarizing is deliberately not attempted. The summary exists and is
+   * marked as a truncation fallback; paying a second call to improve it is a
+   * different trade from paying one to recover what the window decided.
+   */
+  private async retryPendingExtraction(conversationId: number): Promise<void> {
+    const pending = await this.db.get(
+      `SELECT eventId, summaryId, COALESCE(extractionRetries, 0) AS retries
+         FROM compaction_events
+        WHERE conversationId = ?
+          AND kind = 'leaf'
+          AND usedFallback = 1
+          AND summaryId IS NOT NULL
+          -- A fallback never reached the model, so it never extracted
+          -- anything; a successful call that found nothing is not pending.
+          AND COALESCE(extractionAdded, 0) = 0
+          AND COALESCE(extractionInvalidated, 0) = 0
+          -- Nothing was said in that window, so there is nothing to recover.
+          AND COALESCE(dialogueChars, 0) > 0
+          AND COALESCE(extractionRetries, 0) < ?
+        ORDER BY eventId ASC
+        LIMIT 1`,
+      [conversationId, AsyncCompactor.MAX_EXTRACTION_RETRIES]
+    );
+    if (!pending) return;
+
+    const messages: MessageRow[] = await this.db.all(
+      `SELECT m.messageId, m.seq, m.role, m.content, m.tokenCount, m.tier, m.createdAt
+         FROM summary_messages sm
+         JOIN conversation_messages m ON m.messageId = sm.messageId
+        WHERE sm.summaryId = ?
+        ORDER BY m.seq ASC`,
+      pending.summaryId
+    );
+    if (messages.length === 0) return;
+
+    await this.db.run(
+      "UPDATE compaction_events SET extractionRetries = ? WHERE eventId = ?",
+      [pending.retries + 1, pending.eventId]
+    );
+
+    const combined = messages.map(renderMessage).join(SEPARATOR);
+    // The same contiguous range the original call used, not this batch's own
+    // first message: a window's prose opens it, before any tool runs, so a
+    // range starting at the first M/L message drops the message that states
+    // the task. Reconstructed here from what earlier summaries already cover.
+    const priorCovered = await this.db.get(
+      `SELECT MAX(m.seq) AS maxSeq
+         FROM summary_messages sm
+         JOIN conversation_messages m ON m.messageId = sm.messageId
+        WHERE m.conversationId = ? AND m.seq < ?`,
+      [conversationId, messages[0].seq]
+    );
+    const dialogue = await this.dialogueForRange(
+      conversationId,
+      (priorCovered?.maxSeq ?? -1) + 1,
+      messages[messages.length - 1].seq
+    );
+    if (!dialogue) {
+      // Nothing was said in that window after all, so there is nothing to
+      // recover. Stop it from being picked again on every future run.
+      await this.db.run(
+        "UPDATE compaction_events SET dialogueChars = 0 WHERE eventId = ?",
+        pending.eventId
+      );
+      return;
+    }
+
+    let candidates: CandidateMemory[] = [];
+    let rendered = "";
+    try {
+      const collected = await collectCandidateMemories(this.db, {
+        conversationId,
+        windowFrom: messages[0].createdAt,
+        windowTo: messages[messages.length - 1].createdAt,
+        writtenSince: await this.lastCompactionAt(conversationId),
+        anchors: this.anchorsFromWindow(combined, dialogue),
+        budgetChars: this.config.compactionCandidateChars,
+      });
+      candidates = collected.items;
+      rendered = collected.rendered;
+    } catch (err) {
+      this.logger.warn(`[compactor] retry candidate collection failed: ${err}`);
+    }
+
+    const result = await this.summarize(combined, dialogue, rendered);
+    if (result.telemetry.usedFallback) {
+      this.logger.debug(
+        `[compactor] extraction retry for ${pending.summaryId} fell back again`
+      );
+      return;
+    }
+
+    const extraction = await this.applyExtraction({
+      conversationId,
+      summaryId: pending.summaryId,
+      metadata: result.metadata,
+      candidates,
+      enabled: true,
+    });
+
+    // The counts land on the original row, so one window stays one row.
+    await this.db.run(
+      `UPDATE compaction_events
+          SET extractionAdded = ?, extractionUpdated = ?,
+              extractionInvalidated = ?, extractionRejected = ?
+        WHERE eventId = ?`,
+      [
+        extraction.added,
+        extraction.updated,
+        extraction.invalidated,
+        extraction.rejected,
+        pending.eventId,
+      ]
+    );
+    this.logger.info(
+      `[compactor] recovered extraction for ${pending.summaryId}: ` +
+        `${extraction.added} added, ${extraction.invalidated} invalidated`
+    );
+  }
+
+  /**
+   * Nodes written after the previous compaction are candidates regardless of
+   * whether retrieval ever surfaced them -- the previous window's own output
+   * and anything a mark skill stored are both too new to have been surfaced.
+   */
+  private async lastCompactionAt(conversationId: number): Promise<string> {
+    const row = await this.db.get(
+      "SELECT MAX(createdAt) AS at FROM summaries WHERE conversationId = ?",
+      conversationId
+    );
+    // Before the first compaction there is no "since": everything this session
+    // knows is unseen by extraction, and a session that has never been
+    // compacted holds few memories anyway. The budget bounds the rest.
+    return row?.at ?? "";
+  }
+
+  /**
+   * Write what the call reported. Everything refused here is counted, not
+   * silently dropped: a model that keeps naming ids it was never shown is a
+   * prompt problem, and the only way to see it is to log the refusals.
+   */
+  private async applyExtraction(input: {
+    conversationId: number;
+    summaryId: string;
+    metadata: SummaryMetadata | null;
+    candidates: CandidateMemory[];
+    enabled: boolean;
+  }): Promise<{
+    added: number;
+    updated: number;
+    invalidated: number;
+    rejected: number;
+  }> {
+    const empty = { added: 0, updated: 0, invalidated: 0, rejected: 0 };
+    if (!input.enabled || !input.metadata?.raw) return empty;
+
+    try {
+      const parsed = parseExtractedMemories(
+        input.metadata.raw,
+        input.candidates.map((c) => c.nodeId)
+      );
+      if (parsed.accepted.length === 0 && parsed.rejected.length === 0) return empty;
+
+      const applied = await applyExtractedMemories(createMemoryNodeStore(this.db), {
+        conversationId: input.conversationId,
+        summaryId: input.summaryId,
+        memories: parsed.accepted,
+      });
+      if (parsed.rejected.length > 0) {
+        this.logger.warn(
+          `[compactor] refused ${parsed.rejected.length} extracted memory op(s): ` +
+            parsed.rejected.map((r) => `${r.op}/${r.reason}`).join(", ")
+        );
+      }
+      return {
+        added: applied.counts.added,
+        updated: applied.counts.updated,
+        invalidated: applied.counts.invalidated,
+        rejected: parsed.rejected.length + applied.counts.skipped,
+      };
+    } catch (err) {
+      this.logger.warn(`[compactor] extraction failed: ${err}`);
+      return empty;
+    }
+  }
+
   private async recordCompactionEvent(input: {
     conversationId: number;
     kind: "leaf" | "condensed";
@@ -840,14 +1138,33 @@ export class AsyncCompactor {
     outputTokens: number;
     trigger?: string;
     telemetry: SummaryGenerationTelemetry;
+    /** Length of the whole prompt, which is what the call is billed for. */
+    promptChars?: number;
+    /** What the extraction riding this call did, when it ran. */
+    extraction?: {
+      added: number;
+      updated: number;
+      invalidated: number;
+      rejected: number;
+      candidateCount: number;
+      candidateDropped: number;
+      candidateFromSurfaced: number;
+      candidateFromRecent: number;
+      candidateFromScan: number;
+      dialogueChars: number;
+    };
   }): Promise<void> {
     try {
+      const x = input.extraction;
       await this.db.run(
         `INSERT INTO compaction_events (
            conversationId, kind, trigger, summaryId, inputCount, inputChars,
            outputTokens, llmOutcome, usedFallback, errorMessage, model,
-           latencyMs, createdAt
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           latencyMs, createdAt,
+           extractionAdded, extractionUpdated, extractionInvalidated,
+           extractionRejected, candidateCount, candidateDropped, dialogueChars,
+           promptChars, candidateFromSurfaced, candidateFromRecent, candidateFromScan
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           input.conversationId,
           input.kind,
@@ -862,6 +1179,17 @@ export class AsyncCompactor {
           input.telemetry.model ?? null,
           input.telemetry.latencyMs,
           new Date().toISOString(),
+          x?.added ?? null,
+          x?.updated ?? null,
+          x?.invalidated ?? null,
+          x?.rejected ?? null,
+          x?.candidateCount ?? null,
+          x?.candidateDropped ?? null,
+          x?.dialogueChars ?? null,
+          input.promptChars ?? null,
+          x?.candidateFromSurfaced ?? null,
+          x?.candidateFromRecent ?? null,
+          x?.candidateFromScan ?? null,
         ]
       );
     } catch (err) {

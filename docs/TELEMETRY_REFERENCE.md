@@ -108,8 +108,10 @@ truncation fallback compresses by cutting, not by summarizing.
 
 ## `decision_judge_events`
 
-One row per auto-supersede judge invocation. Only active when
-`CODEMEMORY_AUTO_SUPERSEDE_VIA_LLM=true`.
+**Historical.** One row per auto-supersede judge invocation. The judge was
+retired once compaction-time extraction took over superseding; no new rows are
+written. The 29 rows it left are all session-limit failures, which is the
+evidence that retired it.
 
 | Column | Notes |
 |---|---|
@@ -188,3 +190,24 @@ its mind rather than simply accumulating.
 alongside the anchor-coverage and signature-quality analyses that do not need
 telemetry. Run it against a database with accumulated traffic; the sections
 degrade to a "no data yet" line rather than misreporting an empty table.
+
+### Extraction columns on `compaction_events`
+
+Extraction rides the compaction call, so its cost and its yield are recorded on
+the same row. That pairing is the whole question: riding compaction was chosen
+to avoid new calls, and only cost beside yield can say whether the extra input
+paid for itself.
+
+| Column | Meaning |
+|---|---|
+| `promptChars` | Length of the whole prompt, which is what the call is billed for. `inputChars` counts only the transcript part. |
+| `dialogueChars` | The window's own prose. 0 means a pure tool-call window, where extraction is skipped entirely. |
+| `candidateCount` | Memories shown to the model. |
+| `candidateFromSurfaced` / `candidateFromRecent` / `candidateFromScan` | Where they came from: prompt-time retrieval in this window (A), written since the last compaction (B), or the anchor scan (C). A covered 85% of recent windows; a falling share means the scan is carrying the feature on weights that are guesses. |
+| `candidateDropped` | Candidates cut by the character budget. Persistently above zero is the signal that ranking them by relevance would be worth its cost. |
+| `extractionAdded` / `extractionUpdated` / `extractionInvalidated` | What was written. |
+| `extractionRejected` | Operations refused: an unknown target id, a missing target, an empty statement, a kind this pass does not produce, or contradictory operations on one node. A model that keeps naming ids it was never shown is a prompt problem, and this is the only place it shows. |
+| `extractionRetries` | Retries after a fallback, capped at 2. A fallback never reaches the model, so its window owes an extraction; the retry recovers it without re-summarizing. |
+
+`retrieval_events.promptId` names the turn a retrieval served, so a compaction
+window can be matched to its turns exactly rather than by timestamp range.
