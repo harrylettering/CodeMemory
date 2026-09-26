@@ -70,6 +70,12 @@ export interface CodeMemoryConfig {
   compactionModel?: string;
   /** Max characters of message content fed to `claude --print` per batch (default 24000 ≈ 6k tokens) */
   compactionMaxInputChars: number;
+  /** Characters of M/L messages per batch, counted as rendered. */
+  compactionBatchChars: number;
+  /** Characters of the window's own dialogue added to the call. */
+  compactionDialogueChars: number;
+  /** How long a compaction call may take. */
+  compactionTimeoutMs: number;
   /** If true, skip the LLM call and use the truncation fallback. Useful in
    * offline or test environments where spawning `claude --print` would hang. */
   compactionDisableLlm: boolean;
@@ -139,7 +145,14 @@ export function resolveCodeMemoryConfig(env: NodeJS.ProcessEnv = process.env): C
     compactionTokenThreshold: parseInt(env.CODEMEMORY_COMPACTION_TOKEN_THRESHOLD || "30000"),
     compactionFreshTailCount: parseInt(env.CODEMEMORY_COMPACTION_FRESH_TAIL_COUNT || "20"),
     compactionModel: env.CODEMEMORY_COMPACTION_MODEL || undefined,
-    compactionMaxInputChars: parseInt(env.CODEMEMORY_COMPACTION_MAX_INPUT_CHARS || "24000"),
+    // Raised from 24000 when the window's own dialogue joined the call:
+    // 24k of messages + ~6k of dialogue + ~2k of candidate memories.
+    compactionMaxInputChars: parseInt(env.CODEMEMORY_COMPACTION_MAX_INPUT_CHARS || "34000"),
+    compactionBatchChars: parseInt(env.CODEMEMORY_COMPACTION_BATCH_CHARS || "24000"),
+    compactionDialogueChars: parseInt(env.CODEMEMORY_COMPACTION_DIALOGUE_CHARS || "8000"),
+    // 30s was hardcoded; a larger input needs longer, and compaction is
+    // background work that blocks nobody.
+    compactionTimeoutMs: parseInt(env.CODEMEMORY_COMPACTION_TIMEOUT_MS || "60000"),
     compactionDisableLlm: env.CODEMEMORY_COMPACTION_DISABLE_LLM === "true",
     exploredTargetWindowMs: parseInt(
       env.CODEMEMORY_EXPLORED_TARGET_WINDOW_MS || String(30 * 60 * 1000)

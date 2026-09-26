@@ -316,6 +316,8 @@ async function startDaemon(args) {
                 req.on("data", (c) => chunks.push(c));
                 req.on("end", async () => {
                     let targetSessionId = sessionId;
+                    // SessionEnd sends `final: true`; PreCompact and the tool do not.
+                    let includeFreshTail = false;
                     try {
                         const raw = Buffer.concat(chunks).toString("utf-8").trim();
                         if (raw) {
@@ -323,6 +325,7 @@ async function startDaemon(args) {
                             if (typeof body.sessionId === "string" && body.sessionId) {
                                 targetSessionId = body.sessionId;
                             }
+                            includeFreshTail = body.final === true;
                         }
                     }
                     catch {
@@ -341,7 +344,9 @@ async function startDaemon(args) {
                                 logger.info(`[compact] no conversation for session ${targetSessionId}, skipping`);
                                 return;
                             }
-                            await compactor.forceCompact(conv.conversationId);
+                            await compactor.forceCompact(conv.conversationId, {
+                                includeFreshTail,
+                            });
                             logger.info(`[compact] force-compaction completed for conv ${conv.conversationId} (session ${targetSessionId})`);
                         }
                         catch (err) {

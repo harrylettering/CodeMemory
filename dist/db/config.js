@@ -39,7 +39,14 @@ export function resolveCodeMemoryConfig(env = process.env) {
         compactionTokenThreshold: parseInt(env.CODEMEMORY_COMPACTION_TOKEN_THRESHOLD || "30000"),
         compactionFreshTailCount: parseInt(env.CODEMEMORY_COMPACTION_FRESH_TAIL_COUNT || "20"),
         compactionModel: env.CODEMEMORY_COMPACTION_MODEL || undefined,
-        compactionMaxInputChars: parseInt(env.CODEMEMORY_COMPACTION_MAX_INPUT_CHARS || "24000"),
+        // Raised from 24000 when the window's own dialogue joined the call:
+        // 24k of messages + ~6k of dialogue + ~2k of candidate memories.
+        compactionMaxInputChars: parseInt(env.CODEMEMORY_COMPACTION_MAX_INPUT_CHARS || "34000"),
+        compactionBatchChars: parseInt(env.CODEMEMORY_COMPACTION_BATCH_CHARS || "24000"),
+        compactionDialogueChars: parseInt(env.CODEMEMORY_COMPACTION_DIALOGUE_CHARS || "8000"),
+        // 30s was hardcoded; a larger input needs longer, and compaction is
+        // background work that blocks nobody.
+        compactionTimeoutMs: parseInt(env.CODEMEMORY_COMPACTION_TIMEOUT_MS || "60000"),
         compactionDisableLlm: env.CODEMEMORY_COMPACTION_DISABLE_LLM === "true",
         exploredTargetWindowMs: parseInt(env.CODEMEMORY_EXPLORED_TARGET_WINDOW_MS || String(30 * 60 * 1000)),
         workspaceRoot: env.CODEMEMORY_WORKSPACE_ROOT || process.cwd(),
