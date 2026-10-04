@@ -691,6 +691,15 @@ async function startDaemon(args) {
                             textContent: score.content,
                         }],
                 });
+                // The row was deduplicated, but everything below it is work done
+                // *around* a message: telemetry, failure extraction, fix-attempt
+                // tracking. Running it again counted the line twice and built a
+                // second failure node from the same error -- node ids are keyed by
+                // seq, so they do not collapse into one the way the row does.
+                if (insertedMessage.alreadyStored) {
+                    logger.debug(`Skipping a line already stored (uuid=${message.sourceUuid ?? "none"})`);
+                    return;
+                }
                 await memoryStore.recordIngestion({
                     conversationId: conversation.conversationId,
                     sessionId: fileSessionId,

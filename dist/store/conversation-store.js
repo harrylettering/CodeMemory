@@ -80,6 +80,7 @@ export class ConversationStore {
                     content: existing.content,
                     tokenCount: existing.tokenCount,
                     createdAt: existing.createdAt,
+                    alreadyStored: true,
                 };
             }
         }
@@ -124,6 +125,7 @@ export class ConversationStore {
                 content: existing.content,
                 tokenCount: existing.tokenCount,
                 createdAt: existing.createdAt,
+                alreadyStored: true,
             };
         }
         for (const part of params.parts) {
@@ -143,7 +145,8 @@ export class ConversationStore {
             role: params.role,
             content: params.content,
             tokenCount: params.tokenCount,
-            createdAt: now
+            createdAt: now,
+            alreadyStored: false,
         };
     }
     async getMessage(messageId) {
