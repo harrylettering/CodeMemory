@@ -953,6 +953,35 @@ export async function runCodeMemoryMigrations(db: any): Promise<void> {
   await addColumnIfMissing(db, "ingestion_events", "producerAgentId", "TEXT");
   await addColumnIfMissing(db, "ingestion_events", "producerPromptId", "TEXT");
 
+  // What the extraction riding this compaction call did. Kept on the same row
+  // as the call so cost and yield can be read together: the point of riding
+  // compaction was to avoid new calls, and only these two numbers side by side
+  // can say whether the extra input was worth it.
+  await addColumnIfMissing(db, "compaction_events", "extractionAdded", "INTEGER");
+  await addColumnIfMissing(db, "compaction_events", "extractionUpdated", "INTEGER");
+  await addColumnIfMissing(db, "compaction_events", "extractionInvalidated", "INTEGER");
+  await addColumnIfMissing(db, "compaction_events", "extractionRejected", "INTEGER");
+  await addColumnIfMissing(db, "compaction_events", "candidateCount", "INTEGER");
+  await addColumnIfMissing(db, "compaction_events", "candidateDropped", "INTEGER");
+  await addColumnIfMissing(db, "compaction_events", "dialogueChars", "INTEGER");
+  // How many times the extraction for this window has been retried after the
+  // call fell back. Bounded, so a window whose content the model keeps
+  // refusing does not become a standing cost.
+  await addColumnIfMissing(db, "compaction_events", "extractionRetries", "INTEGER");
+  // What the call actually cost, and where its candidate memories came from.
+  // Riding compaction was chosen to avoid new calls, so the open question is
+  // whether the extra input pays for itself -- which needs cost and yield on
+  // one row. The source split matters on its own: surfaced (A) covers 85% of
+  // recent windows, and if that share drops the fallback scan is carrying the
+  // feature on weights that are guesses.
+  await addColumnIfMissing(db, "compaction_events", "promptChars", "INTEGER");
+  await addColumnIfMissing(db, "compaction_events", "candidateFromSurfaced", "INTEGER");
+  await addColumnIfMissing(db, "compaction_events", "candidateFromRecent", "INTEGER");
+  await addColumnIfMissing(db, "compaction_events", "candidateFromScan", "INTEGER");
+  // The turn a retrieval belongs to. Windows are matched to retrieval events
+  // by timestamp, which is approximate at the edges; the id is exact.
+  await addColumnIfMissing(db, "retrieval_events", "promptId", "TEXT");
+
   console.log(`[codememory] Database migrations completed successfully`);
 }
 

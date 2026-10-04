@@ -4,7 +4,7 @@
 
 所有配置都通过 `CODEMEMORY_` 前缀的环境变量传入。默认值在 [`src/db/config.ts`](../src/db/config.ts) 的 `resolveCodeMemoryConfig` 中解析。README 的 Configuration 段只列出了最常调的旋钮；本文档是完整覆盖面。
 
-每个模型环境变量都是独立的，`CODEMEMORY_EXPANSION_MODEL`、`CODEMEMORY_QUERY_PLANNER_MODEL`、`CODEMEMORY_COMPACTION_MODEL`、`CODEMEMORY_AUTO_SUPERSEDE_MODEL` 四个默认都不设置。不设置意味着不传 `--model`，直接用宿主当前的模型。空字符串按未设置处理，不会被当成一个名字为空的模型。
+每个模型环境变量都是独立的，`CODEMEMORY_EXPANSION_MODEL`、`CODEMEMORY_QUERY_PLANNER_MODEL`、`CODEMEMORY_COMPACTION_MODEL` 三个默认都不设置。不设置意味着不传 `--model`，直接用宿主当前的模型。空字符串按未设置处理，不会被当成一个名字为空的模型。
 
 > 旧文档里出现过、但本文未列出的环境变量，已在清理中作为 dead-letter 删除（在 config 中声明但运行时无人消费）。如果你的 shell 中还设置着这些变量，它们现在已经无效，可以移除。
 
@@ -69,16 +69,14 @@
 
 | 变量 | 默认值 | 作用 |
 |---|---|---|
-| `CODEMEMORY_AUTO_SUPERSEDE_VIA_LLM` | `false` | LLM-as-judge auto-supersede 总开关。 |
-| `CODEMEMORY_AUTO_SUPERSEDE_MODEL` | _(unset)_ | judge 模型。 |
-| `CODEMEMORY_AUTO_SUPERSEDE_MAX_CANDIDATES` | `20` | 每次 judge 考虑的活跃 decision 上限。 |
 | `CODEMEMORY_DAEMON_IDLE_TIMEOUT_MS` | `1800000`（30 分钟） | 多久没有活动后 daemon 自行退出。钩子访问 socket、或 transcript 出现新行都算活动。`0` 关闭。SessionEnd 不是可靠的收尾信号，不设这个的话 daemon 会一直活到机器重启。 |
 | `CODEMEMORY_RESPAWN_TIMEOUT` | `1.5` | UserPromptSubmit 等待 daemon 重新拉起的秒数。刻意比 SessionStart 的预算短：它跑在用户回车到模型开始之间，起不来就下一个提示再试，不会丢数据，因为读取位置是持久的。 |
 | `CODEMEMORY_ACTIVE_TASK_STALE_DAYS` | `14` | 活跃 task 多少天没被触碰后标记为 stale。task 是唯一没有自身终态的 kind，不设这个的话做完的任务会被永远当成当前目标召回。仍在被检索命中的 task 不受影响。 |
-| `CODEMEMORY_AUTO_SUPERSEDE_TIMEOUT_MS` | `8000` | judge 调用硬超时。 |
 
 ## 已清理（不再识别）
 
 下列变量历史上声明过但运行时无人消费，本次清理一并移除以避免"调了没用"的误导。如果你的环境里还设着这些，可以放心移除：
 
 `CODEMEMORY_CONTEXT_THRESHOLD`、`CODEMEMORY_FRESH_TAIL_COUNT`（compactor 用的是 `CODEMEMORY_COMPACTION_FRESH_TAIL_COUNT`）、`CODEMEMORY_LEAF_MIN_FANOUT`、`CODEMEMORY_CONDENSED_MIN_FANOUT_HARD`、`CODEMEMORY_MAX_ROUNDS`、`CODEMEMORY_TIMEZONE`、`CODEMEMORY_PRUNE_HEARTBEAT_OK`、`CODEMEMORY_CIRCUIT_BREAKER_COOLDOWN_MS`、`CODEMEMORY_CIRCUIT_BREAKER_THRESHOLD`、`CODEMEMORY_MAX_EXPAND_QUERY_TOKENS`、`CODEMEMORY_SUMMARY_MODEL`、`CODEMEMORY_SUMMARY_PROVIDER`、`CODEMEMORY_FILES_PATH`、`CODEMEMORY_IGNORE_SESSION_PATTERNS`、`CODEMEMORY_STATELESS_SESSION_PATTERNS`、`CODEMEMORY_SKIP_STATELESS_SESSIONS`。
+
+> **已下线：** `CODEMEMORY_AUTO_SUPERSEDE_*` 系列变量已移除。写入时判定 supersede 的 LLM 判官在真实机器上从未成功过（29 次调用、29 次额度失败），它的职责现在由搭在压缩上的抽取承担——后者看得到整个窗口，而不只是一个节点。这些变量留着也不起作用。

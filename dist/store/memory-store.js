@@ -751,8 +751,8 @@ export class MemoryNodeStore {
            candidateCount, selectedNodeCount, stitchedRelationCount,
            stitchedChainCount, summaryEvidenceCount, firstHopNodeCount,
            secondHopNodeCount, estimatedTokens, queryCount, failureLookupCount,
-           failureHits, decisionHits, messageHits, surfacedNodeIds, createdAt
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, [
+           failureHits, decisionHits, messageHits, surfacedNodeIds, promptId, createdAt
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, [
                 input.conversationId ?? null,
                 input.sessionId ?? null,
                 input.promptLength,
@@ -781,6 +781,7 @@ export class MemoryNodeStore {
                 input.surfacedNodeIds?.length
                     ? JSON.stringify(input.surfacedNodeIds)
                     : null,
+                input.promptId ?? null,
                 new Date().toISOString(),
             ]);
         }
@@ -850,6 +851,7 @@ export class MemoryNodeStore {
             sourceToolUseId: input.sourceToolUseId ?? null,
             content: input.content,
             metadata: {
+                ...(input.metadata ?? {}),
                 messageId: input.messageId ?? null,
                 sourceToolUseId: input.sourceToolUseId ?? null,
                 decision: input.decision,
@@ -866,117 +868,7 @@ export class MemoryNodeStore {
                 evidenceMessageId,
             });
         }
-        else if (this.options.autoSupersedeViaLlm && this.options.decisionJudge) {
-            await this.runDecisionJudgeBackstop({
-                newNode: node,
-                evidenceMessageId,
-            });
-        }
         return (await this.getNode(node.nodeId)) ?? node;
-    }
-    async runDecisionJudgeBackstop(input) {
-        const judge = this.options.decisionJudge;
-        if (!judge)
-            return;
-        if (input.newNode.conversationId == null)
-            return;
-        const limit = clampJudgeCandidateLimit(this.options.autoSupersedeMaxCandidates);
-        const candidates = (await this.listDecisionNodes({
-            conversationId: input.newNode.conversationId,
-            limit,
-        })).filter((c) => c.nodeId !== input.newNode.nodeId);
-        if (candidates.length === 0) {
-            await this.recordDecisionJudge({
-                newNode: input.newNode,
-                candidateCount: 0,
-                supersededNodeIds: [],
-                outcome: "no_candidates",
-            });
-            return;
-        }
-        const startedAt = Date.now();
-        let outcomes;
-        try {
-            outcomes = await judge.judge({
-                newDecision: {
-                    nodeId: input.newNode.nodeId,
-                    content: input.newNode.content,
-                },
-                candidates: candidates.map((c) => ({
-                    nodeId: c.nodeId,
-                    content: c.content,
-                })),
-            });
-        }
-        catch (err) {
-            // Still swallowed: a judge failure must not fail the write that
-            // triggered it. But it is no longer invisible — an authentication
-            // failure or a timeout on every call used to look exactly like a judge
-            // that ran and agreed with everything.
-            await this.recordDecisionJudge({
-                newNode: input.newNode,
-                candidateCount: candidates.length,
-                supersededNodeIds: [],
-                outcome: "error",
-                errorMessage: err instanceof Error ? err.message : String(err),
-                latencyMs: Date.now() - startedAt,
-            });
-            return;
-        }
-        const latencyMs = Date.now() - startedAt;
-        const supersededNodeIds = [];
-        for (const outcome of outcomes) {
-            if (outcome.verdict !== "SUPERSEDED_BY_NEW")
-                continue;
-            await this.supersedeDecision({
-                oldNodeId: outcome.nodeId,
-                newNodeId: input.newNode.nodeId,
-                reason: outcome.reason
-                    ? `auto-supersede via LLM judge: ${outcome.reason}`
-                    : "auto-supersede via LLM judge",
-                evidenceMessageId: input.evidenceMessageId,
-            });
-            supersededNodeIds.push(outcome.nodeId);
-        }
-        // An empty verdict list means the model answered but nothing parsed, which
-        // is a prompt or model problem. A full list of KEEPs means it worked and
-        // was conservative. Same zero supersedes, different diagnosis.
-        await this.recordDecisionJudge({
-            newNode: input.newNode,
-            candidateCount: candidates.length,
-            supersededNodeIds,
-            outcome: supersededNodeIds.length > 0
-                ? "superseded"
-                : outcomes.length === 0
-                    ? "empty_verdict"
-                    : "all_kept",
-            latencyMs,
-        });
-    }
-    async recordDecisionJudge(input) {
-        try {
-            await this.db.run(`INSERT INTO decision_judge_events (
-           conversationId, sessionId, newNodeId, candidateCount,
-           supersededCount, outcome, supersededNodeIds, errorMessage,
-           latencyMs, createdAt
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, [
-                input.newNode.conversationId ?? null,
-                input.newNode.sessionId ?? null,
-                input.newNode.nodeId,
-                input.candidateCount,
-                input.supersededNodeIds.length,
-                input.outcome,
-                input.supersededNodeIds.length
-                    ? JSON.stringify(input.supersededNodeIds)
-                    : null,
-                input.errorMessage ?? null,
-                input.latencyMs ?? null,
-                new Date().toISOString(),
-            ]);
-        }
-        catch {
-            // Telemetry is never worth failing a write over.
-        }
     }
     async createFailureNode(input) {
         const content = renderFailureContent(input);

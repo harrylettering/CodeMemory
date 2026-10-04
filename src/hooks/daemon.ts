@@ -32,7 +32,6 @@ import { RetrievalEngine } from "../retrieval.js";
 import { createSmartQueryPlanner } from "../query-planner.js";
 import { SummaryStore } from "../store/summary-store.js";
 import { createMemoryNodeStore } from "../store/memory-store.js";
-import { createDecisionSupersedeJudge } from "../store/decision-supersede-judge.js";
 import { LifecycleResolver } from "../lifecycle-resolver.js";
 import { FixAttemptTracker } from "../fix-attempt-tracker.js";
 import { AsyncCompactor } from "../compaction/compactor.js";
@@ -125,16 +124,7 @@ async function startDaemon(args: string[]) {
     const db = await createCodeMemoryDatabaseConnection(config.databasePath);
     const conversationStore = new ConversationStore(db);
     const summaryStore = new SummaryStore(db);
-    const memoryStore = createMemoryNodeStore(db, {
-      autoSupersedeViaLlm: config.autoSupersedeViaLlm,
-      autoSupersedeMaxCandidates: config.autoSupersedeMaxCandidates,
-      decisionJudge: config.autoSupersedeViaLlm
-        ? createDecisionSupersedeJudge({
-            model: config.autoSupersedeModel,
-            timeoutMs: config.autoSupersedeTimeoutMs,
-          })
-        : undefined,
-    });
+    const memoryStore = createMemoryNodeStore(db);
     const lifecycleResolver = new LifecycleResolver(memoryStore);
     const fixAttemptTracker = new FixAttemptTracker(
       db,
@@ -264,6 +254,10 @@ async function startDaemon(args: string[]) {
           try {
             const body = JSON.parse(Buffer.concat(chunks).toString("utf-8"));
             const prompt: string = body.prompt || "";
+            // Sent by the hook. The window→turn match is a timestamp range
+            // otherwise, which is approximate at the edges.
+            const promptId: string | null =
+              typeof body.promptId === "string" && body.promptId ? body.promptId : null;
             // Best-effort: scope to the current session's conversation if
             // we can find one. Cross-session failure recall still happens
             // via the retrieval engine's default behavior.
@@ -285,6 +279,7 @@ async function startDaemon(args: string[]) {
               await memoryStore.recordRetrieval({
                 conversationId,
                 sessionId,
+                promptId,
                 promptLength: prompt.length,
                 plannerSource: result.planner?.source ?? "fast",
                 plannerAttempted: result.planner?.attempted ?? false,

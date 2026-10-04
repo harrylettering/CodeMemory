@@ -13,7 +13,6 @@ describe("resolveCodeMemoryConfig", () => {
     expect(config.expansionModel).toBeUndefined();
     expect(config.queryPlannerModel).toBeUndefined();
     expect(config.compactionModel).toBeUndefined();
-    expect(config.autoSupersedeModel).toBeUndefined();
   });
 
   it("treats an empty string as unset rather than as a model named ''", () => {
@@ -33,7 +32,6 @@ describe("resolveCodeMemoryConfig", () => {
     expect(config.expansionModel).toBe("expansion-only-model");
     expect(config.compactionModel).toBe("compaction-only-model");
     expect(config.queryPlannerModel).toBeUndefined();
-    expect(config.autoSupersedeModel).toBeUndefined();
   });
 });
 

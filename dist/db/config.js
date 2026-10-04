@@ -44,6 +44,9 @@ export function resolveCodeMemoryConfig(env = process.env) {
         compactionMaxInputChars: parseInt(env.CODEMEMORY_COMPACTION_MAX_INPUT_CHARS || "34000"),
         compactionBatchChars: parseInt(env.CODEMEMORY_COMPACTION_BATCH_CHARS || "24000"),
         compactionDialogueChars: parseInt(env.CODEMEMORY_COMPACTION_DIALOGUE_CHARS || "8000"),
+        // Titles only: ~15 candidates. Sending 200 characters of content each cost
+        // about 1,000 tokens on every compaction, re-sent every time.
+        compactionCandidateChars: parseInt(env.CODEMEMORY_COMPACTION_CANDIDATE_CHARS || "2000"),
         // 30s was hardcoded; a larger input needs longer, and compaction is
         // background work that blocks nobody.
         compactionTimeoutMs: parseInt(env.CODEMEMORY_COMPACTION_TIMEOUT_MS || "60000"),
@@ -52,10 +55,6 @@ export function resolveCodeMemoryConfig(env = process.env) {
         workspaceRoot: env.CODEMEMORY_WORKSPACE_ROOT || process.cwd(),
         daemonIdleTimeoutMs: parseInt(env.CODEMEMORY_DAEMON_IDLE_TIMEOUT_MS || String(30 * 60 * 1000)),
         activeTaskStaleDays: parseInt(env.CODEMEMORY_ACTIVE_TASK_STALE_DAYS || "14"),
-        autoSupersedeViaLlm: env.CODEMEMORY_AUTO_SUPERSEDE_VIA_LLM === "true",
-        autoSupersedeModel: env.CODEMEMORY_AUTO_SUPERSEDE_MODEL || undefined,
-        autoSupersedeMaxCandidates: parseInt(env.CODEMEMORY_AUTO_SUPERSEDE_MAX_CANDIDATES || "20"),
-        autoSupersedeTimeoutMs: parseInt(env.CODEMEMORY_AUTO_SUPERSEDE_TIMEOUT_MS || "8000"),
     };
 }
 //# sourceMappingURL=config.js.map

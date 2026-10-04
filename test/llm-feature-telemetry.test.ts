@@ -2,7 +2,9 @@
  * Telemetry for the two optional LLM-backed features.
  *
  * Both were enabled in settings and neither could be shown to have ever run.
- * The decision judge recorded something only when it ruled SUPERSEDED_BY_NEW
+ * Telemetry for the LLM-backed features that remain: retrieval planning and
+ * expansion. The decision judge that used to be covered here was retired when
+ * compaction-time extraction took over superseding (see the plan's T4.6).
  * and swallowed every error at the call site, so three very different states
  * looked identical from outside: never invoked, invoked and conservatively
  * kept everything, invoked and failed on every call. The first needs a
@@ -23,7 +25,6 @@ import {
   createMemoryNodeStore,
   type MemoryNodeStore,
 } from "../src/store/memory-store.js";
-import type { DecisionSupersedeJudge } from "../src/store/decision-supersede-judge.js";
 
 let dbDir: string;
 let db: any;
@@ -38,15 +39,8 @@ afterEach(async () => {
   rmSync(dbDir, { recursive: true, force: true });
 });
 
-const judgeEvents = () => db.all("SELECT * FROM decision_judge_events ORDER BY eventId");
 const retrievalEvents = () => db.all("SELECT * FROM retrieval_events ORDER BY eventId");
 
-function storeWithJudge(judge: DecisionSupersedeJudge): MemoryNodeStore {
-  return createMemoryNodeStore(db, {
-    autoSupersedeViaLlm: true,
-    decisionJudge: judge,
-  });
-}
 
 const decision = (store: MemoryNodeStore, text: string, seq: number) =>
   store.createDecisionNode({
@@ -57,105 +51,6 @@ const decision = (store: MemoryNodeStore, text: string, seq: number) =>
     content: `[DECISION] ${text}\nWhy: because`,
     sourceToolUseId: `toolu_${seq}`,
   });
-
-describe("decision judge telemetry", () => {
-  it("records a row when the judge keeps every candidate", async () => {
-    const store = storeWithJudge({
-      async judge(input) {
-        return input.candidates.map((c) => ({
-          nodeId: c.nodeId,
-          verdict: "KEEP" as const,
-        }));
-      },
-    });
-
-    await decision(store, "Use library A", 1);
-    await decision(store, "Name the module widgets", 2);
-
-    const rows = await judgeEvents();
-    const kept = rows.filter((r: any) => r.outcome === "all_kept");
-    expect(kept).toHaveLength(1);
-    expect(kept[0].candidateCount).toBe(1);
-    expect(kept[0].supersededCount).toBe(0);
-    expect(kept[0].errorMessage).toBeNull();
-  });
-
-  it("separates a parse failure from a conservative keep", async () => {
-    const store = storeWithJudge({
-      async judge() {
-        return [];
-      },
-    });
-
-    await decision(store, "Use library A", 1);
-    await decision(store, "Use library B instead", 2);
-
-    const rows = await judgeEvents();
-    expect(rows.map((r: any) => r.outcome)).toContain("empty_verdict");
-    expect(rows.map((r: any) => r.outcome)).not.toContain("all_kept");
-  });
-
-  it("records the error instead of swallowing it, and still writes the node", async () => {
-    const store = storeWithJudge({
-      async judge() {
-        throw new Error("claude --print exited with code 1: not authenticated");
-      },
-    });
-
-    await decision(store, "Use library A", 1);
-    const node = await decision(store, "Use library B instead", 2);
-
-    // The write that triggered the judge must survive the judge failing.
-    expect(node.nodeId).toBeTruthy();
-
-    const errors = (await judgeEvents()).filter((r: any) => r.outcome === "error");
-    expect(errors).toHaveLength(1);
-    expect(errors[0].errorMessage).toContain("not authenticated");
-    expect(errors[0].candidateCount).toBe(1);
-  });
-
-  it("records the supersede it performed, with the node it retired", async () => {
-    let firstNodeId = "";
-    const store = storeWithJudge({
-      async judge(input) {
-        return input.candidates.map((c) => ({
-          nodeId: c.nodeId,
-          verdict: "SUPERSEDED_BY_NEW" as const,
-          reason: "same topic",
-        }));
-      },
-    });
-
-    firstNodeId = (await decision(store, "Use library A", 1)).nodeId;
-    await decision(store, "Use library B instead", 2);
-
-    const rows = (await judgeEvents()).filter((r: any) => r.outcome === "superseded");
-    expect(rows).toHaveLength(1);
-    expect(rows[0].supersededCount).toBe(1);
-    expect(JSON.parse(rows[0].supersededNodeIds)).toEqual([firstNodeId]);
-  });
-
-  it("distinguishes having nothing to compare against from having agreed", async () => {
-    const store = storeWithJudge({
-      async judge() {
-        throw new Error("should not be called");
-      },
-    });
-
-    await decision(store, "Use library A", 1);
-
-    const rows = await judgeEvents();
-    expect(rows).toHaveLength(1);
-    expect(rows[0].outcome).toBe("no_candidates");
-  });
-
-  it("writes no row at all when the feature is off", async () => {
-    const store = createMemoryNodeStore(db, { autoSupersedeViaLlm: false });
-    await decision(store, "Use library A", 1);
-    await decision(store, "Use library B instead", 2);
-    expect(await judgeEvents()).toHaveLength(0);
-  });
-});
 
 describe("retrieval telemetry", () => {
   it("keeps the prompts that injected nothing, so a hit rate exists", async () => {
